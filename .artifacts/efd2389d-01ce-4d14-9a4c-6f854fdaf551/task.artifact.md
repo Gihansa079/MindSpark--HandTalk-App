@@ -1,0 +1,5 @@
+- [x] Fix package declarations in core files
+- [x] Implement `HistoryViewModel` logic (`historyList`, `addTranslation`)
+- [x] Remove duplicate `HistoryItem` and `HistoryScreen` declarations
+- [x] Fix references in Login and Register activities
+- [x] Verify build

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Mindspark2" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Set the initial window background to match your splash top color -->
+        <item name="android:windowBackground">#042F62</item>
+
+        <!-- Make system status & navigation bars transparent -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
