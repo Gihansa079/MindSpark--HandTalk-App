@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -54,13 +55,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.example.mindspark2.ApiService
 import com.example.mindspark2.history.HistoryActivity
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
-import kotlin.jvm.java
 
 enum class CameraMode {
     PHOTO, VIDEO
@@ -213,10 +215,15 @@ fun startVideoRecording(
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun CameraScreen(navController: NavController, onGestureRecognized: Function<Unit>) {
+fun CameraScreen(
+    navController: NavController,
+    onGestureRecognized: Function<Unit>,
+    apiService: ApiService = ApiService.create()
+) {
     val context = LocalContext.current
     val activity = context as? Activity
     val lifecycleOwner = LocalLifecycleOwner.current
+    val coroutineScope = rememberCoroutineScope()
 
     val cameraPermissionState = rememberPermissionState(permission = Manifest.permission.CAMERA)
 
@@ -231,12 +238,13 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
     var activeRecording: Recording? by remember { mutableStateOf(null) }
 
     var isCaptured by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
     var capturedType by remember { mutableStateOf(CameraMode.PHOTO) }
     var sourceLanguage by remember { mutableStateOf("Sinhala") }
     var targetLanguage by remember { mutableStateOf("English") }
 
-    var sourceText by remember { mutableStateOf("ආයුබෝවන්") }
-    var translatedText by remember { mutableStateOf("Hello") }
+    var sourceText by remember { mutableStateOf("") }
+    var translatedText by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         if (!cameraPermissionState.status.isGranted) {
@@ -277,6 +285,30 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
             }
 
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "TranslationSpeechId")
+        }
+    }
+
+    // Backend Node.js Database එකෙන් Sinhala -> English translation එක ලබා ගැනීම
+    fun fetchTranslationFromDB(detectedSinhalaWord: String) {
+        isLoading = true
+        sourceText = detectedSinhalaWord
+        isCaptured = true
+
+        coroutineScope.launch {
+            try {
+                val response = apiService.getTranslation(detectedSinhalaWord)
+                if (response.isSuccessful && response.body() != null) {
+                    translatedText = response.body()?.english_text ?: "Translation not found"
+                    speakText(translatedText, targetLanguage)
+                } else {
+                    translatedText = "Translation not found"
+                }
+            } catch (e: Exception) {
+                translatedText = "Connection Error"
+                Log.e("CameraScreen", "API Call Error: ${e.message}")
+            } finally {
+                isLoading = false
+            }
         }
     }
 
@@ -452,13 +484,11 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                 )
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Camera Screen එකේ Top Bar එකේ History Button එක
                     Box(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(CircleShape)
                             .clickable {
-                                // NavController වෙනුවට direct Activity Intent එකක් භාවිතා කරන්න
                                 val intent = Intent(context, HistoryActivity::class.java)
                                 context.startActivity(intent)
                             },
@@ -553,7 +583,7 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Gallery Thumbnail Button
+                    // Gallery Button
                     Box(
                         modifier = Modifier
                             .size(56.dp)
@@ -583,12 +613,10 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                                 .background(if (currentMode == CameraMode.VIDEO) Color.Red else Color.White)
                                 .clickable {
                                     if (currentMode == CameraMode.PHOTO) {
-                                        takePhotoAndSaveToGallery(context, imageCapture) { savedUri ->
+                                        takePhotoAndSaveToGallery(context, imageCapture) {
                                             capturedType = CameraMode.PHOTO
-                                            sourceText = "ආයුබෝවන්"
-                                            translatedText = "Hello"
-                                            isCaptured = true
-                                            speakText(translatedText, targetLanguage)
+                                            // GestureDetector / ML Model එකෙන් හඳුනාගන්නා සිංහල වචනය Pass කරන්න
+                                            fetchTranslationFromDB("ආයුබෝවන්")
                                         }
                                     } else {
                                         if (isRecording) {
@@ -604,12 +632,9 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                                                     activeRecording = recording
                                                     isRecording = true
                                                 },
-                                                onRecordingFinished = { savedUri ->
+                                                onRecordingFinished = {
                                                     capturedType = CameraMode.VIDEO
-                                                    sourceText = "ස්තුතියි"
-                                                    translatedText = "Thank You"
-                                                    isCaptured = true
-                                                    speakText(translatedText, targetLanguage)
+                                                    fetchTranslationFromDB("ස්තුතියි")
                                                 }
                                             )
                                         }
@@ -676,9 +701,7 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                             modifier = Modifier
                                 .clip(RoundedCornerShape(50.dp))
                                 .background(if (currentMode == CameraMode.VIDEO) Color(0xFF2C2C2C) else Color.Transparent)
-                                .clickable {
-                                    currentMode = CameraMode.VIDEO
-                                }
+                                .clickable { currentMode = CameraMode.VIDEO }
                                 .padding(horizontal = 24.dp, vertical = 12.dp)
                         ) {
                             Text(
@@ -692,7 +715,7 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                 }
             }
 
-            // 4. Translation Result Overlay
+            // 4. Translation Result Overlay Popup
             AnimatedVisibility(
                 visible = isCaptured,
                 enter = fadeIn(),
@@ -701,7 +724,7 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.9f))
+                        .background(Color.Black.copy(alpha = 0.85f))
                         .padding(24.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -775,103 +798,36 @@ fun CameraScreen(navController: NavController, onGestureRecognized: Function<Uni
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
-
-                        Text(
-                            text = if (capturedType == CameraMode.PHOTO) "📷 Photo Translation" else "🎥 Video Translation",
-                            color = Color.Gray,
-                            fontSize = 14.sp
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF2B2B2B))
-                                .padding(14.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = sourceText,
-                                    color = Color.White,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = "🔊",
-                                    fontSize = 16.sp,
-                                    modifier = Modifier.clickable { speakText(sourceText, sourceLanguage) }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.Black)
-                                .padding(18.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = translatedText,
-                                    color = Color(0xFF00FF66),
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "🔊",
-                                    fontSize = 18.sp,
-                                    modifier = Modifier.clickable { speakText(translatedText, targetLanguage) }
-                                )
-                            }
-                        }
-
                         Spacer(modifier = Modifier.height(24.dp))
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50.dp))
-                                    .background(Color.DarkGray)
-                                    .clickable {
-                                        ttsEngine?.stop()
-                                        isCaptured = false
-                                    }
-                                    .padding(horizontal = 28.dp, vertical = 12.dp)
-                            ) {
-                                Text(text = "Retake", color = Color.White, fontSize = 15.sp)
-                            }
+                        if (isLoading) {
+                            CircularProgressIndicator(color = Color(0xFF00FF66))
+                        } else {
+                            Text(
+                                text = sourceText,
+                                color = Color.Gray,
+                                fontSize = 18.sp,
+                                textAlign = TextAlign.Center
+                            )
 
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50.dp))
-                                    .background(Color(0xFF00FF66))
-                                    .clickable {
-                                        ttsEngine?.stop()
-                                        isCaptured = false
-                                    }
-                                    .padding(horizontal = 28.dp, vertical = 12.dp)
-                            ) {
-                                Text(text = "Done", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Text(
+                                text = translatedText,
+                                color = Color(0xFF00FF66),
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        Button(
+                            onClick = { isCaptured = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(text = "Close", fontSize = 16.sp)
                         }
                     }
                 }

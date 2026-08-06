@@ -28,12 +28,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
 import com.example.mindspark2.camera.CameraActivity
 import com.example.mindspark2.history.HistoryActivity
 import com.example.mindspark2.image.ImageActivity
 import com.example.mindspark2.learn.LearnActivity
 import com.example.mindspark2.ProfileActivity
 import com.example.mindspark2.ui.theme.Mindspark2Theme
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -45,6 +47,12 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var currentTheme: String = "Light"
     private var selectedVoiceGender = mutableStateOf("Female")
     private var loggedInUserName: String = "User"
+
+    // PostgreSQL Database එකෙන් එන Latest Translation සඳහා States
+    private var latestEnglishText = mutableStateOf("Hello")
+    private var latestSinhalaText = mutableStateOf("ආයුබෝවන්")
+
+    private val apiService by lazy { ApiService.create() }
 
     private val profileLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -61,7 +69,6 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // LoginActivity එකෙන් pass කරපු USER_NAME එක ලබා ගැනීම
         loggedInUserName = intent.getStringExtra("USER_NAME") ?: "User"
 
         prefsManager = PreferencesManager(this)
@@ -70,7 +77,24 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
 
+        fetchLatestTranslation()
+
         applyUI()
+    }
+
+    private fun fetchLatestTranslation() {
+        lifecycleScope.launch {
+            try {
+                val response = apiService.getLatestTranslation()
+                if (response.isSuccessful && response.body() != null) {
+                    val data = response.body()!!
+                    latestEnglishText.value = data.english_text ?: "Hello"
+                    latestSinhalaText.value = data.sinhala_text ?: "ආයුබෝවන්"
+                }
+            } catch (e: Exception) {
+                Log.e("HomeActivity", "PostgreSQL Fetch Error: ${e.message}")
+            }
+        }
     }
 
     private fun applyUI() {
@@ -86,6 +110,8 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                         userName = loggedInUserName,
                         currentVoiceGender = selectedVoiceGender.value,
                         isDark = isDark,
+                        latestEnglishState = latestEnglishText,
+                        latestSinhalaState = latestSinhalaText,
                         onOpenProfile = { openProfileActivity() },
                         onPlayAudio = { text, languageCode ->
                             val isFemale = selectedVoiceGender.value.equals("Female", ignoreCase = true)
@@ -165,6 +191,7 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     override fun onResume() {
         super.onResume()
+        fetchLatestTranslation()
         if (::prefsManager.isInitialized && prefsManager.theme != currentTheme) {
             currentTheme = prefsManager.theme
             recreate()
@@ -183,6 +210,8 @@ fun HomeScreen(
     userName: String = "User",
     currentVoiceGender: String,
     isDark: Boolean,
+    latestEnglishState: State<String>,
+    latestSinhalaState: State<String>,
     onOpenProfile: () -> Unit,
     onPlayAudio: (text: String, languageCode: String) -> Unit
 ) {
@@ -418,6 +447,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
+                // Dynamic Latest Translation Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(25.dp),
@@ -452,15 +482,16 @@ fun HomeScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        // DB එකෙන් ලැබෙන Live Text State එක Read කිරීම
                         Text(
-                            text = "🤟 Hello",
+                            text = "🤟 ${latestEnglishState.value}",
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold,
                             color = cardTextColor
                         )
 
                         Text(
-                            text = "සිංහල : ආයුබෝවන්",
+                            text = "සිංහල : ${latestSinhalaState.value}",
                             color = if (isDark) Color.LightGray else Color.DarkGray,
                             fontSize = 16.sp
                         )
@@ -472,7 +503,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { onPlayAudio("ආයුබෝවන්", "si") },
+                                onClick = { onPlayAudio(latestSinhalaState.value, "si") },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
@@ -480,7 +511,7 @@ fun HomeScreen(
                             }
 
                             OutlinedButton(
-                                onClick = { onPlayAudio("Hello", "en") },
+                                onClick = { onPlayAudio(latestEnglishState.value, "en") },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp)
                             ) {

@@ -19,12 +19,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import com.example.mindspark2.ApiService
 import com.example.mindspark2.PreferencesManager
 import com.example.mindspark2.ui.theme.Mindspark2Theme
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class LearnActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -58,8 +62,8 @@ class LearnActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     LearnScreen(
                         isDark = isDark,
                         onBackClick = { finish() },
-                        onPlayAudio = { sinhalaText ->
-                            speakText(sinhalaText)
+                        onPlayAudio = { text, isSinhala ->
+                            speakText(text, isSinhala)
                         }
                     )
                 }
@@ -69,20 +73,25 @@ class LearnActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("si", "LK"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts?.language = Locale.US
-            }
             isTtsReady = true
         } else {
             Log.e("LearnActivity", "TTS Initialization Failed")
         }
     }
 
-    private fun speakText(text: String) {
+    private fun speakText(text: String, isSinhala: Boolean) {
         if (!isTtsReady || tts == null) {
             Toast.makeText(this, "TTS Engine is initializing...", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        if (isSinhala) {
+            val result = tts?.setLanguage(Locale("si", "LK"))
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.language = Locale.US
+            }
+        } else {
+            tts?.language = Locale.US
         }
 
         if (prefsManager.voiceGender.equals("Male", ignoreCase = true)) {
@@ -112,7 +121,7 @@ class LearnActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 }
 
 data class SignItem(
-    val icon: String,
+    val gestureMediaUrl: String,
     val englishText: String,
     val sinhalaText: String,
     val category: String
@@ -123,24 +132,55 @@ data class SignItem(
 fun LearnScreen(
     isDark: Boolean,
     onBackClick: () -> Unit,
-    onPlayAudio: (String) -> Unit
+    onPlayAudio: (text: String, isSinhala: Boolean) -> Unit,
+    apiService: ApiService = ApiService.create()
 ) {
     val categories = listOf("All", "Alphabet", "Numbers", "Greetings", "Daily")
     var selectedCategory by remember { mutableStateOf("All") }
 
-    val signList = remember {
-        listOf(
-            SignItem("🅰️", "A", "අ", "Alphabet"),
-            SignItem("🅱️", "B", "බ", "Alphabet"),
-            SignItem("1️⃣", "One", "එක", "Numbers"),
-            SignItem("2️⃣", "Two", "දෙක", "Numbers"),
-            SignItem("👋", "Hello", "ආයුබෝවන්", "Greetings"),
-            SignItem("🙏", "Thank You", "ස්තූතියි", "Greetings"),
-            SignItem("🤝", "Please", "කරුණාකර", "Greetings"),
-            SignItem("🥛", "Water", "වතුර", "Daily"),
-            SignItem("🍚", "Food", "කෑම", "Daily"),
-            SignItem("🏠", "Home", "ගෙදර", "Daily")
-        )
+    var signList by remember { mutableStateOf<List<SignItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        coroutineScope.launch {
+            try {
+                val response = apiService.getAllTranslations()
+                if (response.isSuccessful && response.body() != null) {
+                    val dbList = response.body()!!
+
+                    signList = dbList.map { translation ->
+                        val english = translation.english_text ?: "N/A"
+                        val sinhala = translation.sinhala_text ?: "N/A"
+
+                        val category = when {
+                            english.length == 1 && english.first().isLetter() -> "Alphabet"
+                            english.toIntOrNull() != null -> "Numbers"
+                            english.contains("Hello", true) || english.contains("Thank", true) || english.contains("Please", true) -> "Greetings"
+                            else -> "Daily"
+                        }
+
+                        // Word එකට අදාළ Dynamic Gesture Image/Illustration URL එක සාදයි
+                        val gestureMediaUrl = "https://api.dicebear.com/7.x/shapes/svg?seed=${english.lowercase()}"
+
+                        SignItem(
+                            gestureMediaUrl = gestureMediaUrl,
+                            englishText = english,
+                            sinhalaText = sinhala,
+                            category = category
+                        )
+                    }
+                } else {
+                    errorMessage = "Failed to load translations"
+                }
+            } catch (e: Exception) {
+                errorMessage = "Network Error: ${e.message}"
+            } finally {
+                isLoading = false
+            }
+        }
     }
 
     val filteredList = if (selectedCategory == "All") {
@@ -169,33 +209,17 @@ fun LearnScreen(
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(horizontal = 20.dp)
         ) {
-
             Spacer(modifier = Modifier.height(10.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = onBackClick,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Text(
-                        text = "←",
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
+                IconButton(onClick = onBackClick, modifier = Modifier.size(36.dp)) {
+                    Text(text = "←", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 }
-
                 Spacer(modifier = Modifier.width(10.dp))
-
-                Text(
-                    text = "Learn Sign Language",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                Text(text = "Learn Sign Language", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -225,59 +249,81 @@ fun LearnScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 20.dp)
-            ) {
-                items(filteredList) { sign ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(170.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(containerColor = cardBg),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.SpaceBetween
+            if (isLoading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else if (errorMessage != null) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(text = errorMessage!!, color = Color.White, fontSize = 16.sp)
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.fillMaxSize().padding(bottom = 20.dp)
+                ) {
+                    items(filteredList) { sign ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth().height(220.dp),
+                            shape = RoundedCornerShape(20.dp),
+                            colors = CardDefaults.cardColors(containerColor = cardBg),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
                         ) {
-                            Text(
-                                text = sign.icon,
-                                fontSize = 42.sp
-                            )
-
                             Column(
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                modifier = Modifier.fillMaxSize().padding(12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text(
-                                    text = sign.englishText,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = cardTextColor,
-                                    textAlign = TextAlign.Center
+                                // Gesture Image / Motion Asset Visualizer
+                                AsyncImage(
+                                    model = sign.gestureMediaUrl,
+                                    contentDescription = "Gesture for ${sign.englishText}",
+                                    modifier = Modifier
+                                        .size(65.dp)
+                                        .padding(4.dp),
+                                    contentScale = ContentScale.Fit
                                 )
 
-                                Text(
-                                    text = "සිංහල: ${sign.sinhalaText}",
-                                    fontSize = 14.sp,
-                                    color = if (isDark) Color.LightGray else Color.Gray,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = sign.sinhalaText,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = cardTextColor,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        text = sign.englishText,
+                                        fontSize = 13.sp,
+                                        color = if (isDark) Color.LightGray else Color.Gray,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
 
-                            IconButton(
-                                onClick = { onPlayAudio(sign.sinhalaText) },
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Text(text = "🔊", fontSize = 18.sp)
+                                // Primary: Sinhala Audio, Optional: English Audio
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    Button(
+                                        onClick = { onPlayAudio(sign.sinhalaText, true) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(32.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2682CC))
+                                    ) {
+                                        Text(text = "🔊 සිංහල", fontSize = 11.sp, color = Color.White)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { onPlayAudio(sign.englishText, false) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text(text = "EN", fontSize = 11.sp, color = cardTextColor)
+                                    }
+                                }
                             }
                         }
                     }
