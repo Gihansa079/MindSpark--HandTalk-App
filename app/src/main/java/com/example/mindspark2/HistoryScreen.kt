@@ -1,89 +1,401 @@
 package com.example.mindspark2.camera
 
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.mindspark2.ApiService
+import com.example.mindspark2.PreferencesManager
+import kotlinx.coroutines.launch
+import java.util.Locale
 
+// UI Model for History Items
+data class HistoryModel(
+    val id: Int,
+    val sinhalaText: String,
+    val englishText: String,
+    val date: String = "Recent",
+    val type: String = "IMAGE"
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(navController: NavController) {
-    // Sample dummy scan/translation history data
-    val historyList = listOf(
-        "ආයුබෝවන්" to "Hello / Welcome",
-        "ස්තුතියි" to "Thank you",
-        "සුබ උදෑසනක්" to "Good Morning"
-    )
+fun HistoryScreen(
+    navController: NavController,
+    apiService: ApiService = ApiService.create()
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val prefsManager = remember { PreferencesManager(context) }
+    val isDark = prefsManager.theme == "Dark"
 
-    Column(
+    var historyList by remember { mutableStateOf<List<HistoryModel>>(emptyList()) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showClearDialog by remember { mutableStateOf(false) }
+    var itemToDelete by remember { mutableStateOf<HistoryModel?>(null) }
+
+    // TTS Setup
+    var tts by remember { mutableStateOf<TextToSpeech?>(null) }
+    var isTtsReady by remember { mutableStateOf(false) }
+
+    DisposableEffect(context) {
+        val ttsEngine = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                isTtsReady = true
+            } else {
+                Log.e("HistoryScreen", "TTS Init Failed")
+            }
+        }
+        tts = ttsEngine
+
+        onDispose {
+            ttsEngine.stop()
+            ttsEngine.shutdown()
+        }
+    }
+
+    fun speakText(text: String, languageCode: String) {
+        if (!isTtsReady || tts == null) {
+            Toast.makeText(context, "TTS Engine is initializing...", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val locale = if (languageCode == "si") Locale("si", "LK") else Locale.US
+        val result = tts?.setLanguage(locale)
+
+        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+            Toast.makeText(context, "Language ($languageCode) not supported", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (prefsManager.voiceGender.equals("Male", ignoreCase = true)) {
+            tts?.setPitch(0.7f)
+            tts?.setSpeechRate(0.9f)
+        } else {
+            tts?.setPitch(1.2f)
+            tts?.setSpeechRate(1.0f)
+        }
+
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "HistoryTTS")
+    }
+
+    // Fetch History
+    fun fetchHistory() {
+        isLoading = true
+        errorMessage = null
+        coroutineScope.launch {
+            try {
+                val response = apiService.getAllTranslations()
+                if (response.isSuccessful && response.body() != null) {
+                    val dbList = response.body()!!
+                    historyList = dbList
+                        .filter { it.show_in_history == true }
+                        .map { translation ->
+                            val imageUrl = translation.image_url ?: ""
+                            val isVideo = imageUrl.contains(".mp4", ignoreCase = true) || imageUrl.contains("/video/", ignoreCase = true)
+
+                            HistoryModel(
+                                id = translation.id ?: 0,
+                                sinhalaText = translation.sinhala_text ?: "N/A",
+                                englishText = translation.english_text ?: "N/A",
+                                date = translation.created_at?.take(10) ?: "Recent",
+                                type = if (isVideo) "VIDEO" else "IMAGE"
+                            )
+                        }
+                } else {
+                    errorMessage = "Failed to load history data"
+                }
+            } catch (e: Exception) {
+                errorMessage = "Network Error: ${e.message}"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        fetchHistory()
+    }
+
+    // Delete Handlers
+    fun deleteSingleItem(item: HistoryModel) {
+        coroutineScope.launch {
+            try {
+                val res = apiService.hideFromHistory(item.id)
+                if (res.isSuccessful) {
+                    historyList = historyList.filter { it.id != item.id }
+                    Toast.makeText(context, "Item removed", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun clearAllHistory() {
+        coroutineScope.launch {
+            try {
+                val res = apiService.hideAllFromHistory()
+                if (res.isSuccessful) {
+                    historyList = emptyList()
+                    Toast.makeText(context, "History cleared", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val filteredHistory = historyList.filter {
+        it.englishText.contains(searchQuery, ignoreCase = true) ||
+                it.sinhalaText.contains(searchQuery, ignoreCase = true)
+    }
+
+    val bgGradient = if (isDark) {
+        listOf(Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF0F172A))
+    } else {
+        listOf(Color(0xFF042F62), Color(0xFF2682CC), Color(0xFFEAF6FF))
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
-            .statusBarsPadding()
-            .padding(16.dp)
+            .background(Brush.verticalGradient(colors = bgGradient))
     ) {
-        // Header with Back Button
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(bottom = 20.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(horizontal = 20.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color.DarkGray)
-                    .clickable {
-                        // Go back to camera
-                        navController.popBackStack()
-                    },
-                contentAlignment = Alignment.Center
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Header Section
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(text = "←", color = Color.White, fontSize = 24.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.2f))
+                            .clickable { navController.popBackStack() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "←", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    Text(
+                        text = "Translation History",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                if (historyList.isNotEmpty()) {
+                    TextButton(onClick = { showClearDialog = true }) {
+                        Text(text = "Clear All", color = Color(0xFFFF6B6B), fontWeight = FontWeight.Bold)
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Text(
-                text = "Translation History",
-                color = Color.White,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
+            // Search Bar
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search translations...", color = Color.LightGray) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.White.copy(alpha = 0.15f),
+                    unfocusedContainerColor = Color.White.copy(alpha = 0.1f),
+                    focusedBorderColor = Color.White,
+                    unfocusedBorderColor = Color.Transparent,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Content States
+            if (isLoading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else if (errorMessage != null) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(text = errorMessage!!, color = Color.White, fontSize = 16.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = { fetchHistory() }) { Text("Retry") }
+                }
+            } else if (filteredHistory.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (searchQuery.isEmpty()) "No history available" else "No matching results found",
+                        color = Color.White,
+                        fontSize = 16.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(bottom = 20.dp)
+                ) {
+                    items(filteredHistory, key = { it.id }) { item ->
+                        HistoryItemCard(
+                            item = item,
+                            isDark = isDark,
+                            onPlayAudio = { text, lang -> speakText(text, lang) },
+                            onDeleteClick = { itemToDelete = item }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Dialogs
+        if (itemToDelete != null) {
+            AlertDialog(
+                onDismissRequest = { itemToDelete = null },
+                title = { Text(text = "Remove History Item") },
+                text = { Text(text = "Are you sure you want to remove this item?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            itemToDelete?.let { deleteSingleItem(it) }
+                            itemToDelete = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4D4D))
+                    ) { Text("Remove", color = Color.White) }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { itemToDelete = null }) { Text("Cancel") }
+                }
             )
         }
 
-        // History Items List
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(historyList) { item ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF1E1E1E))
-                        .padding(16.dp)
-                ) {
-                    Text(text = item.first, color = Color.Gray, fontSize = 14.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = item.second,
-                        color = Color(0xFF00FF66),
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+        if (showClearDialog) {
+            AlertDialog(
+                onDismissRequest = { showClearDialog = false },
+                title = { Text(text = "Clear History") },
+                text = { Text(text = "Are you sure you want to clear all history?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            clearAllHistory()
+                            showClearDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4D4D))
+                    ) { Text("Clear All", color = Color.White) }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { showClearDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun HistoryItemCard(
+    item: HistoryModel,
+    isDark: Boolean,
+    onPlayAudio: (String, String) -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val cardBg = if (isDark) Color(0xFF1E293B) else Color.White.copy(alpha = 0.95f)
+    val mainTextColor = if (isDark) Color.White else Color(0xFF042F62)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = cardBg),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (item.type == "IMAGE") "🖼️ Image" else "🎥 Video",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isDark) Color(0xFF60A5FA) else Color(0xFF2682CC)
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = item.date, fontSize = 12.sp, color = if (isDark) Color.LightGray else Color.Gray)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(onClick = onDeleteClick, modifier = Modifier.size(24.dp)) {
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF6B6B))
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "🤟 ${item.englishText}",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = mainTextColor
+            )
+
+            Text(
+                text = "සිංහල: ${item.sinhalaText}",
+                fontSize = 15.sp,
+                color = if (isDark) Color.LightGray else Color.DarkGray
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                IconButton(onClick = { onPlayAudio(item.sinhalaText, "si") }, modifier = Modifier.size(32.dp)) {
+                    Text(text = "🔊🇱🇰", fontSize = 14.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(onClick = { onPlayAudio(item.englishText, "en") }, modifier = Modifier.size(32.dp)) {
+                    Text(text = "🔊🇺🇸", fontSize = 14.sp)
                 }
             }
         }

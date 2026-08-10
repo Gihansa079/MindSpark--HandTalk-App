@@ -1,6 +1,7 @@
 package com.example.mindspark2.image
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -36,8 +37,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import com.example.mindspark2.ApiService
 import com.example.mindspark2.ProfileActivity
 import com.example.mindspark2.ui.theme.Mindspark2Theme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 
 class ImageActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -162,6 +172,24 @@ enum class MediaType {
     IMAGE, VIDEO
 }
 
+// Helper to convert URI to temporary File for Multipart API request
+fun uriToFile(context: Context, uri: Uri): File? {
+    return try {
+        val inputStream = context.contentResolver.openInputStream(uri) ?: return null
+        val tempFile = File.createTempFile("upload_media", ".tmp", context.cacheDir)
+        val outputStream = FileOutputStream(tempFile)
+        inputStream.use { input ->
+            outputStream.use { output ->
+                input.copyTo(output)
+            }
+        }
+        tempFile
+    } catch (e: Exception) {
+        Log.e("ImageActivity", "Error converting URI to File", e)
+        null
+    }
+}
+
 @Composable
 fun MediaTranslationScreen(
     currentVoiceGender: String,
@@ -170,12 +198,15 @@ fun MediaTranslationScreen(
     onPlayAudio: (text: String, languageCode: String) -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val apiService = remember { ApiService.create() }
 
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
     var selectedMediaType by remember { mutableStateOf<MediaType?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var englishTranslation by remember { mutableStateOf<String?>(null) }
     var sinhalaTranslation by remember { mutableStateOf<String?>(null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -191,6 +222,7 @@ fun MediaTranslationScreen(
 
             englishTranslation = null
             sinhalaTranslation = null
+            errorMessage = null
         }
     }
 
@@ -249,15 +281,13 @@ fun MediaTranslationScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(280.dp)
-                    .then(
-                        if (selectedMediaUri == null) {
-                            Modifier.clickable {
-                                mediaPickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                                )
-                            }
-                        } else Modifier
-                    ),
+                    .clickable {
+                        if (!isProcessing) {
+                            mediaPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        }
+                    },
                 shape = RoundedCornerShape(25.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = Color.White.copy(alpha = 0.9f)
@@ -321,18 +351,65 @@ fun MediaTranslationScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            errorMessage?.let { msg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 15.dp),
+                    color = Color(0xFFFFEBEE),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = msg,
+                        color = Color(0xFFD32F2F),
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(12.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
             Button(
                 onClick = {
                     if (selectedMediaUri == null) {
                         Toast.makeText(context, "Please select an image or video first!", Toast.LENGTH_SHORT).show()
                     } else {
                         isProcessing = true
+                        errorMessage = null
 
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                            isProcessing = false
-                            englishTranslation = "Thank You"
-                            sinhalaTranslation = "ස්තූතියි"
-                        }, 2000)
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val file = uriToFile(context, selectedMediaUri!!)
+                                if (file != null) {
+                                    val mimeType = context.contentResolver.getType(selectedMediaUri!!) ?: "media/*"
+                                    val requestFile = file.asRequestBody(mimeType.toMediaTypeOrNull())
+                                    val body = MultipartBody.Part.createFormData("media", file.name, requestFile)
+
+                                    val response = apiService.translateMedia(body)
+
+                                    withContext(Dispatchers.Main) {
+                                        if (response.isSuccessful && response.body() != null) {
+                                            englishTranslation = response.body()?.english_text ?: "Thank You"
+                                            sinhalaTranslation = response.body()?.sinhala_text ?: "ස්තූතියි"
+                                        } else {
+                                            errorMessage = "Processing failed. Please try again."
+                                        }
+                                    }
+                                } else {
+                                    withContext(Dispatchers.Main) {
+                                        errorMessage = "Unable to read selected media file."
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    errorMessage = "Connection Error: ${e.message}"
+                                }
+                            } finally {
+                                withContext(Dispatchers.Main) {
+                                    isProcessing = false
+                                }
+                            }
+                        }
                     }
                 },
                 modifier = Modifier

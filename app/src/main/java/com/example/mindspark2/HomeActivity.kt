@@ -1,12 +1,15 @@
 package com.example.mindspark2
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,12 +31,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.mindspark2.camera.CameraActivity
 import com.example.mindspark2.history.HistoryActivity
 import com.example.mindspark2.image.ImageActivity
 import com.example.mindspark2.learn.LearnActivity
-import com.example.mindspark2.ProfileActivity
 import com.example.mindspark2.ui.theme.Mindspark2Theme
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -48,11 +51,20 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var selectedVoiceGender = mutableStateOf("Female")
     private var loggedInUserName: String = "User"
 
-    // PostgreSQL Database එකෙන් එන Latest Translation සඳහා States
     private var latestEnglishText = mutableStateOf("Hello")
     private var latestSinhalaText = mutableStateOf("ආයුබෝවන්")
 
     private val apiService by lazy { ApiService.create() }
+
+    private val requestAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            Toast.makeText(this, "Audio permission granted!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Audio permission is required for voice features", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val profileLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -69,6 +81,8 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        checkAudioPermission()
+
         loggedInUserName = intent.getStringExtra("USER_NAME") ?: "User"
 
         prefsManager = PreferencesManager(this)
@@ -80,6 +94,14 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         fetchLatestTranslation()
 
         applyUI()
+    }
+
+    private fun checkAudioPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     private fun fetchLatestTranslation() {
@@ -116,7 +138,8 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                         onPlayAudio = { text, languageCode ->
                             val isFemale = selectedVoiceGender.value.equals("Female", ignoreCase = true)
                             speakText(text, languageCode, isFemale)
-                        }
+                        },
+                        onExitApp = { finishAffinity() } // FR 43: Safe App Exit
                     )
                 }
             }
@@ -192,6 +215,7 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onResume() {
         super.onResume()
         fetchLatestTranslation()
+
         if (::prefsManager.isInitialized && prefsManager.theme != currentTheme) {
             currentTheme = prefsManager.theme
             recreate()
@@ -213,10 +237,17 @@ fun HomeScreen(
     latestEnglishState: State<String>,
     latestSinhalaState: State<String>,
     onOpenProfile: () -> Unit,
-    onPlayAudio: (text: String, languageCode: String) -> Unit
+    onPlayAudio: (text: String, languageCode: String) -> Unit,
+    onExitApp: () -> Unit
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showExitDialog by remember { mutableStateOf(false) }
+
+    // FR 43: Back button handler for exit confirmation
+    BackHandler {
+        showExitDialog = true
+    }
 
     val bgGradient = if (isDark) {
         listOf(Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF0F172A))
@@ -447,7 +478,6 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Dynamic Latest Translation Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(25.dp),
@@ -482,7 +512,6 @@ fun HomeScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // DB එකෙන් ලැබෙන Live Text State එක Read කිරීම
                         Text(
                             text = "🤟 ${latestEnglishState.value}",
                             fontSize = 22.sp,
@@ -522,6 +551,31 @@ fun HomeScreen(
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
+            }
+
+            // FR 43 Exit Application Dialog
+            if (showExitDialog) {
+                AlertDialog(
+                    onDismissRequest = { showExitDialog = false },
+                    title = { Text("Exit Application") },
+                    text = { Text("Are you sure you want to exit MindSpark?") },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showExitDialog = false
+                                onExitApp()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4D4D))
+                        ) {
+                            Text("Exit", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        OutlinedButton(onClick = { showExitDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
             }
         }
     }
