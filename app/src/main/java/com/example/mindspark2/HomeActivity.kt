@@ -43,29 +43,36 @@ import java.util.Locale
 
 class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
+    // TextToSpeech Engine එක පාලනය කිරීම සඳහා Variables
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
 
+    // App Preferences සහ User Data සඳහා වන Variables
     private lateinit var prefsManager: PreferencesManager
     private var currentTheme: String = "Light"
     private var selectedVoiceGender = mutableStateOf("Female")
     private var loggedInUserName: String = "User"
 
+    // Translation Data සඳහා වන Mutable State Variables
     private var latestEnglishText = mutableStateOf("Hello")
     private var latestSinhalaText = mutableStateOf("ආයුබෝවන්")
 
+    // Retrofit API Service එක Lazy load කිරීම
     private val apiService by lazy { ApiService.create() }
 
+    // FR 05: Audio/Microphone Permission එක Request කිරීම සඳහා වන Launcher එක
     private val requestAudioPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) {
-            Toast.makeText(this, "Audio permission granted!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Audio access permission granted!", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "Audio permission is required for voice features", Toast.LENGTH_SHORT).show()
+            // Permission ලබා නොදුන් විට User ව දැනුවත් කිරීම
+            Toast.makeText(this, "Audio permission is required for voice and sound features", Toast.LENGTH_SHORT).show()
         }
     }
 
+    // Profile Activity එකෙන් නැවත පැමිණෙන විට Selected Voice එක (Male/Female) Update කරගැනීමට
     private val profileLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -81,21 +88,28 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // 1. App එක Start වන විටම Audio Access Permission එක පරීක්ෂා කිරීම
         checkAudioPermission()
 
+        // Intent එකෙන් එන User Name එක ලබා ගැනීම
         loggedInUserName = intent.getStringExtra("USER_NAME") ?: "User"
 
+        // Theme සහ Voice Preferences Load කර ගැනීම
         prefsManager = PreferencesManager(this)
         currentTheme = prefsManager.theme
         selectedVoiceGender.value = prefsManager.voiceGender
 
+        // 2. Text-To-Speech Engine එක Initialize කිරීම
         tts = TextToSpeech(this, this)
 
+        // API එකෙන් ලඟදීම සිදුවූ Translation දත්ත ලබා ගැනීම
         fetchLatestTranslation()
 
+        // Jetpack Compose UI එක Render කිරීම
         applyUI()
     }
 
+    // FR 05: Microphone Permission එක තිබේදැයි බලන සහ නැතිනම් Request කරන Function එක
     private fun checkAudioPermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -104,6 +118,7 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // Backend (PostgreSQL via API) එකෙන් අලුත්ම Translation දත්ත ලබා ගැනීම
     private fun fetchLatestTranslation() {
         lifecycleScope.launch {
             try {
@@ -119,6 +134,7 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // UI එක Apply කරන Function එක
     private fun applyUI() {
         val isDark = currentTheme == "Dark"
 
@@ -153,6 +169,7 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         profileLauncher.launch(intent)
     }
 
+    // TextToSpeech Initialization එක සාර්ථකදැයි පරීක්ෂා කිරීම
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             isTtsReady = true
@@ -161,12 +178,25 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // FR 05: Audio Access පාලනය කරමින් Voice Output එක ලබා දෙන ශ්‍රිතය
     private fun speakText(text: String, languageCode: String, isFemale: Boolean) {
+        // [FR 05 Fix]: Audio Access Permission ලබා දී නැතිනම් Voice Output එක සීමා කිරීම
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            Toast.makeText(this, "Audio access permission is required to play voice output", Toast.LENGTH_SHORT).show()
+            // Permission එක නැවත ඉල්ලා සිටීම
+            requestAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        // TTS Engine එක Ready නැතිනම් Toast එකක් පෙන්වා නතර වීම
         if (!isTtsReady || tts == null) {
             Toast.makeText(this, "TTS Engine is initializing...", Toast.LENGTH_SHORT).show()
             return
         }
 
+        // භාෂාව තේරීම (Sinhala හෝ English)
         val locale = when (languageCode) {
             "si" -> Locale("si", "LK")
             else -> Locale.US
@@ -174,11 +204,13 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         val result = tts?.setLanguage(locale)
 
+        // අදාළ Language Pack එක Device එකේ නැත්නම් Alert කිරීම
         if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
             Toast.makeText(this, "Language ($languageCode) not supported on this device", Toast.LENGTH_SHORT).show()
             return
         }
 
+        // Male / Female Voice Profile එක Set කිරීම
         var voiceSet = false
         val availableVoices = tts?.voices
 
@@ -199,29 +231,34 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
         }
 
+        // Specific Voice Profile එකක් නැත්නම් Pitch/SpeechRate වෙනස් කර Gender එක වෙනස් කිරීම
         if (!voiceSet) {
             if (isFemale) {
-                tts?.setPitch(1.3f)
+                tts?.setPitch(1.2f)      // Natural Female Voice Pitch
                 tts?.setSpeechRate(1.0f)
             } else {
-                tts?.setPitch(0.7f)
-                tts?.setSpeechRate(0.95f)
+                tts?.setPitch(0.55f)     // Natural & Deep Male Voice Pitch
+                tts?.setSpeechRate(0.8f)
             }
         }
 
+        // Speaker එක මගින් ශබ්දය පිටතට ලබා දීම
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "MindsparkTTS")
     }
 
     override fun onResume() {
         super.onResume()
+        // Screen එකට නැවත එනවිට අලුත්ම Translation Load කරගැනීම
         fetchLatestTranslation()
 
+        // Settings වල Theme වෙනස් වී ඇත්නම් Activity එක Recreate කිරීම
         if (::prefsManager.isInitialized && prefsManager.theme != currentTheme) {
             currentTheme = prefsManager.theme
             recreate()
         }
     }
 
+    // Activity එක Destroy වන විට TTS Engine එක Stop කර Memory Leak වැළැක්වීම
     override fun onDestroy() {
         tts?.stop()
         tts?.shutdown()
@@ -244,11 +281,12 @@ fun HomeScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     var showExitDialog by remember { mutableStateOf(false) }
 
-    // FR 43: Back button handler for exit confirmation
+    // FR 43: Back Button එක ඔබනවිට App Exit Dialog එක පෙන්වීම
     BackHandler {
         showExitDialog = true
     }
 
+    // Light / Dark Theme වලට අදාළ Gradient Colors
     val bgGradient = if (isDark) {
         listOf(Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF0F172A))
     } else {
@@ -258,13 +296,14 @@ fun HomeScreen(
     val cardBg = if (isDark) Color(0xFF1E293B) else Color.White.copy(alpha = 0.95f)
     val cardTextColor = if (isDark) Color.White else Color.Black
     val featureCardBg1 = if (isDark) Color(0xFF0369A1) else Color(0xFFE0F2FE)
-    val featureCardBg2 = if (isDark) Color(0xFF15803D) else Color(0xFFDCFCE7)
+    val featureCardBg2 = if (isDark) Color(0xFF158017) else Color(0xFFDCFCE7)
     val featureCardBg3 = if (isDark) Color(0xFFB45309) else Color(0xFFFEF3C7)
     val featureTextColor = if (isDark) Color.White else Color(0xFF0F172A)
 
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
+            // Bottom Navigation Bar එක
             NavigationBar(
                 containerColor = if (isDark) Color(0xFF1E293B) else Color.White
             ) {
@@ -324,6 +363,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                // Header Section: Greeting සහ Profile Avatar
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -364,6 +404,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
+                // Real-time AI Vision Translation Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(30.dp),
@@ -432,6 +473,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                // Image Recognition Feature Card
                 FeatureCard(
                     modifier = Modifier.fillMaxWidth(),
                     icon = "🖼",
@@ -448,6 +490,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                // Learn Signs & History Log Feature Cards
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -478,6 +521,7 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
+                // Latest Translation Section (Audio Player Controls)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(25.dp),
@@ -498,6 +542,7 @@ fun HomeScreen(
                                 color = if (isDark) Color(0xFF60A5FA) else Color(0xFF042F62)
                             )
 
+                            // Gender Badge (Male/Female Profile Indicator)
                             SuggestionChip(
                                 onClick = { onOpenProfile() },
                                 label = {
@@ -527,6 +572,7 @@ fun HomeScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
+                        // Audio Playing Buttons (Sinhala & English TTS Trigger)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -553,7 +599,7 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
 
-            // FR 43 Exit Application Dialog
+            // FR 43: Safe Exit Confirmation Dialog Box
             if (showExitDialog) {
                 AlertDialog(
                     onDismissRequest = { showExitDialog = false },
@@ -581,6 +627,7 @@ fun HomeScreen(
     }
 }
 
+// Custom Reusable Feature Card Component
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeatureCard(

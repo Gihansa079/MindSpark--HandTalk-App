@@ -19,8 +19,7 @@ import retrofit2.http.Query
 import java.util.concurrent.TimeUnit
 
 // --- Dynamic Base URL Settings ---
-// ඔබේ PC එකේ IPv4 Address එක (ipconfig මඟින් ලැබෙන IP එක) මෙතැනට යොදන්න:
-private const val LOCAL_IP = "10.40.4.158"
+private const val LOCAL_IP = "10.49.179.122"
 private const val PORT = "3000"
 
 fun isEmulator(): Boolean {
@@ -141,6 +140,7 @@ interface ApiService {
     suspend fun updateUserProfile(@Body request: UserProfileUpdateRequest): Response<ApiResponse>
 
     // Translation Endpoints
+    // 'word' සහ 'text' යන parameters දෙකටම alternate support ඇති ලෙස සකසා ඇත
     @GET("api/translations/search")
     suspend fun getTranslation(
         @Query("text") text: String

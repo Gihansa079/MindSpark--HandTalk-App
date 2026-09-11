@@ -29,7 +29,7 @@ import com.example.mindspark2.PreferencesManager
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-// UI Model for History Items
+// history list එකේ එක item එකක තිබිය යුතු දත්ත ආකෘතිය (Data Structure) defin කර ගැනීම
 data class HistoryModel(
     val id: Int,
     val sinhalaText: String,
@@ -44,11 +44,15 @@ fun HistoryScreen(
     navController: NavController,
     apiService: ApiService = ApiService.create()
 ) {
+    // Android Context එක සහ Coroutine Scope එක ලබා ගැනීම
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+
+    // User preferences (dark/light theme, voice gender) manage කරන class එක
     val prefsManager = remember { PreferencesManager(context) }
     val isDark = prefsManager.theme == "Dark"
 
+    // UI States (දත්ත වෙනස් වන විට UI එක update වීමට භාවිතා කරන variables)
     var historyList by remember { mutableStateOf<List<HistoryModel>>(emptyList()) }
     var searchQuery by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
@@ -56,14 +60,15 @@ fun HistoryScreen(
     var showClearDialog by remember { mutableStateOf(false) }
     var itemToDelete by remember { mutableStateOf<HistoryModel?>(null) }
 
-    // TTS Setup
+    // TextToSpeech (TTS) Engine එක සඳහා වන Variables
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var isTtsReady by remember { mutableStateOf(false) }
 
+    // Component එක Screen එකට එන විට TTS Initialize කිරීම සහ Screen එකෙන් යන විට shutdown කිරීම
     DisposableEffect(context) {
         val ttsEngine = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                isTtsReady = true
+                isTtsReady = true // TTS වැඩ කිරීමට සූදානම්
             } else {
                 Log.e("HistoryScreen", "TTS Init Failed")
             }
@@ -72,15 +77,17 @@ fun HistoryScreen(
 
         onDispose {
             ttsEngine.stop()
-            ttsEngine.shutdown()
+            ttsEngine.shutdown() // Memory Leaks වැළැක්වීමට TTS Engine එක නවත්වයි
         }
     }
 
+    // පෙළ (Text) ශබ්දයට (Audio) හැරවීමේ ශ්‍රිතය (TTS Speak Function)
     fun speakText(text: String, languageCode: String) {
         if (!isTtsReady || tts == null) {
             Toast.makeText(context, "TTS Engine is initializing...", Toast.LENGTH_SHORT).show()
             return
         }
+        // සිංහල හෝ ඉංග්‍රීසි භාෂාව තෝරා ගැනීම
         val locale = if (languageCode == "si") Locale("si", "LK") else Locale.US
         val result = tts?.setLanguage(locale)
 
@@ -89,6 +96,7 @@ fun HistoryScreen(
             return
         }
 
+        // Settings වල ඇති පිරිමි/ගැහැණු කටහඬ අනුව Voice Pitch එක වෙනස් කිරීම
         if (prefsManager.voiceGender.equals("Male", ignoreCase = true)) {
             tts?.setPitch(0.7f)
             tts?.setSpeechRate(0.9f)
@@ -100,7 +108,7 @@ fun HistoryScreen(
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "HistoryTTS")
     }
 
-    // Fetch History
+    // Backend API එකෙන් History දත්ත ලබා ගැනීමේ ශ්‍රිතය
     fun fetchHistory() {
         isLoading = true
         errorMessage = null
@@ -109,6 +117,7 @@ fun HistoryScreen(
                 val response = apiService.getAllTranslations()
                 if (response.isSuccessful && response.body() != null) {
                     val dbList = response.body()!!
+                    // show_in_history true වන දත්ත පමණක් Filter කර HistoryModel වලට Map කිරීම
                     historyList = dbList
                         .filter { it.show_in_history == true }
                         .map { translation ->
@@ -129,21 +138,23 @@ fun HistoryScreen(
             } catch (e: Exception) {
                 errorMessage = "Network Error: ${e.message}"
             } finally {
-                isLoading = false
+                isLoading = false // Loading එක අවසන් කිරීම
             }
         }
     }
 
+    // Screen එක load වන විට ප්‍රථමයෙන්ම fetchHistory() ක්‍රියාත්මක කිරීම
     LaunchedEffect(Unit) {
         fetchHistory()
     }
 
-    // Delete Handlers
+    // තනි History Item එකක් ඉවත් කිරීමේ ශ්‍රිතය
     fun deleteSingleItem(item: HistoryModel) {
         coroutineScope.launch {
             try {
                 val res = apiService.hideFromHistory(item.id)
                 if (res.isSuccessful) {
+                    // List එකෙන් එම item එක ඉවත් කර UI එක Update කිරීම
                     historyList = historyList.filter { it.id != item.id }
                     Toast.makeText(context, "Item removed", Toast.LENGTH_SHORT).show()
                 }
@@ -153,12 +164,13 @@ fun HistoryScreen(
         }
     }
 
+    // සියලුම History Items ඉවත් කිරීමේ ශ්‍රිතය
     fun clearAllHistory() {
         coroutineScope.launch {
             try {
                 val res = apiService.hideAllFromHistory()
                 if (res.isSuccessful) {
-                    historyList = emptyList()
+                    historyList = emptyList() // List එක සම්පූර්ණයෙන්ම හිස් කිරීම
                     Toast.makeText(context, "History cleared", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -167,17 +179,20 @@ fun HistoryScreen(
         }
     }
 
+    // Search Box එකේ টাইප් කරන අකුරු වලට අනුව History List එක Filter කිරීම
     val filteredHistory = historyList.filter {
         it.englishText.contains(searchQuery, ignoreCase = true) ||
                 it.sinhalaText.contains(searchQuery, ignoreCase = true)
     }
 
+    // Theme එක අනුව පසුබිම් වර්ණය (Gradient Background) තෝරා ගැනීම
     val bgGradient = if (isDark) {
         listOf(Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF0F172A))
     } else {
         listOf(Color(0xFF042F62), Color(0xFF2682CC), Color(0xFFEAF6FF))
     }
 
+    // ප්‍රධාන Screen Layout එක
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -191,13 +206,14 @@ fun HistoryScreen(
         ) {
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Header Section
+            // Header කොටස (ආපසු යාමේ බොත්තම, මාතෘකාව සහ Clear All බොත්තම)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Back Button
                     Box(
                         modifier = Modifier
                             .size(36.dp)
@@ -219,6 +235,7 @@ fun HistoryScreen(
                     )
                 }
 
+                // Data තිබේ නම් පමණක් Clear All බොත්තම පෙන්වීම
                 if (historyList.isNotEmpty()) {
                     TextButton(onClick = { showClearDialog = true }) {
                         Text(text = "Clear All", color = Color(0xFFFF6B6B), fontWeight = FontWeight.Bold)
@@ -228,7 +245,7 @@ fun HistoryScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Search Bar
+            // Search Bar Input කොටස
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -248,12 +265,14 @@ fun HistoryScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Content States
+            // දත්ත Load වන අවස්ථා (UI States: Loading / Error / Empty / Data List)
             if (isLoading) {
+                // Data load වන අතරතුර පෙන්වන Circular Indicator එක
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color.White)
                 }
             } else if (errorMessage != null) {
+                // Error එකක් ආ විට පෙන්වන UI එක
                 Column(
                     modifier = Modifier.fillMaxSize(),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -264,6 +283,7 @@ fun HistoryScreen(
                     Button(onClick = { fetchHistory() }) { Text("Retry") }
                 }
             } else if (filteredHistory.isEmpty()) {
+                // දත්ත මුකුත් නැති විට හෝ Search එකට ගැළපෙන දත්ත නැති විට
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         text = if (searchQuery.isEmpty()) "No history available" else "No matching results found",
@@ -272,6 +292,7 @@ fun HistoryScreen(
                     )
                 }
             } else {
+                // Filter වූ History Items ලැයිස්තුව (LazyColumn)
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(bottom = 20.dp)
@@ -288,7 +309,7 @@ fun HistoryScreen(
             }
         }
 
-        // Dialogs
+        // තනි Item එකක් මකා දැමීමට තහවුරු කරගන්නා Dialog එක (Delete Single Item Dialog)
         if (itemToDelete != null) {
             AlertDialog(
                 onDismissRequest = { itemToDelete = null },
@@ -309,6 +330,7 @@ fun HistoryScreen(
             )
         }
 
+        // සියලුම දත්ත මකා දැමීමට තහවුරු කරගන්නා Dialog එක (Clear All Dialog)
         if (showClearDialog) {
             AlertDialog(
                 onDismissRequest = { showClearDialog = false },
@@ -331,6 +353,7 @@ fun HistoryScreen(
     }
 }
 
+// History List එකේ තනි Card එකක් නිර්මාණය කරන Component එක
 @Composable
 fun HistoryItemCard(
     item: HistoryModel,
@@ -338,6 +361,7 @@ fun HistoryItemCard(
     onPlayAudio: (String, String) -> Unit,
     onDeleteClick: () -> Unit
 ) {
+    // Theme එක අනුව Card එකේ වර්ණය තෝරා ගැනීම
     val cardBg = if (isDark) Color(0xFF1E293B) else Color.White.copy(alpha = 0.95f)
     val mainTextColor = if (isDark) Color.White else Color(0xFF042F62)
 
@@ -348,11 +372,13 @@ fun HistoryItemCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // Card එකේ ඉහළ කොටස (Type Icon, Date, Delete Button)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Image ද Video ද යන්න පෙන්වීම
                 Text(
                     text = if (item.type == "IMAGE") "🖼️ Image" else "🎥 Video",
                     fontSize = 12.sp,
@@ -363,6 +389,7 @@ fun HistoryItemCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(text = item.date, fontSize = 12.sp, color = if (isDark) Color.LightGray else Color.Gray)
                     Spacer(modifier = Modifier.width(8.dp))
+                    // Delete Button
                     IconButton(onClick = onDeleteClick, modifier = Modifier.size(24.dp)) {
                         Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF6B6B))
                     }
@@ -371,6 +398,7 @@ fun HistoryItemCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // පරිවර්තනය වූ ඉංග්‍රීසි පෙළ
             Text(
                 text = "🤟 ${item.englishText}",
                 fontSize = 18.sp,
@@ -378,6 +406,7 @@ fun HistoryItemCard(
                 color = mainTextColor
             )
 
+            // පරිවර්තනය වූ සිංහල පෙළ
             Text(
                 text = "සිංහල: ${item.sinhalaText}",
                 fontSize = 15.sp,
@@ -386,14 +415,17 @@ fun HistoryItemCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // ශබ්දය වාදනය කිරීමේ (Audio Playback) බොත්තම්
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
+                // සිංහලෙන් කියවීමට
                 IconButton(onClick = { onPlayAudio(item.sinhalaText, "si") }, modifier = Modifier.size(32.dp)) {
                     Text(text = "🔊🇱🇰", fontSize = 14.sp)
                 }
                 Spacer(modifier = Modifier.width(8.dp))
+                // ඉංග්‍රීසියෙන් කියවීමට
                 IconButton(onClick = { onPlayAudio(item.englishText, "en") }, modifier = Modifier.size(32.dp)) {
                     Text(text = "🔊🇺🇸", fontSize = 14.sp)
                 }
