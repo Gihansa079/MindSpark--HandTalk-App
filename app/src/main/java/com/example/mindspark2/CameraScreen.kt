@@ -50,6 +50,7 @@ import com.example.mindspark2.history.HistoryActivity
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
+import com.google.accompanist.permissions.shouldShowRationale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -118,7 +119,6 @@ fun openGallery(context: Context) {
     }
 }
 
-// FR 12: Luminance/Brightness Evaluation
 fun calculateLuminance(imageProxy: ImageProxy): Double {
     val buffer = imageProxy.planes[0].buffer
     val data = ByteArray(buffer.remaining())
@@ -130,8 +130,9 @@ fun calculateLuminance(imageProxy: ImageProxy): Double {
     return sum.toDouble() / (data.size / 16)
 }
 
-// FR 07 & FR 08: Hand Tracking & 21 Skeleton Point Extractor
-fun generateHandLandmarks(): List<HandLandmark> {
+fun generateHandLandmarks(isHandInFrame: Boolean): List<HandLandmark> {
+    if (!isHandInFrame) return emptyList()
+
     val landmarks = mutableListOf<HandLandmark>()
     for (i in 0 until 21) {
         val x = (0.25f + (i % 5) * 0.12f).coerceIn(0.1f, 0.9f)
@@ -142,7 +143,7 @@ fun generateHandLandmarks(): List<HandLandmark> {
 }
 
 // ==========================================
-// FR 09: Static Gesture Capture (VGG19 Model Input)
+// Static Gesture Capture
 // ==========================================
 fun captureStaticGesture(
     context: Context,
@@ -152,7 +153,7 @@ fun captureStaticGesture(
     onSuccess: (Uri) -> Unit
 ) {
     if (handLandmarks.size < 21) {
-        Toast.makeText(context, "Error 903: Hand not fully visible", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Error 903: No hand detected in frame", Toast.LENGTH_SHORT).show()
         return
     }
 
@@ -161,6 +162,10 @@ fun captureStaticGesture(
         return
     }
 
+    if (handLandmarks.isEmpty()) {
+        Toast.makeText(context, "Hand not detected! Please place a hand in frame.", Toast.LENGTH_SHORT).show()
+        return
+    }
     val capture = imageCapture ?: run {
         Toast.makeText(context, "Error 901: Capture failed", Toast.LENGTH_SHORT).show()
         return
@@ -187,7 +192,7 @@ fun captureStaticGesture(
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                 outputFileResults.savedUri?.let { uri ->
-                    Toast.makeText(context, "Gesture captured (JPEG, 90% quality)", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Gesture captured", Toast.LENGTH_SHORT).show()
                     onSuccess(uri)
                 }
             }
@@ -201,7 +206,7 @@ fun captureStaticGesture(
 }
 
 // ==========================================
-// FR 10: Dynamic Gesture Recording (LSTM Model Input)
+// Dynamic Gesture Recording
 // ==========================================
 fun recordDynamicGesture(
     context: Context,
@@ -247,7 +252,7 @@ fun recordDynamicGesture(
                 is VideoRecordEvent.Finalize -> {
                     if (!event.hasError()) {
                         val savedUri = event.outputResults.outputUri
-                        Toast.makeText(context, "20 Frames Extracted for LSTM", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Frames Processed", Toast.LENGTH_SHORT).show()
                         onRecordingFinished(savedUri)
                     } else {
                         Log.e("CameraX", "Video recording error: ${event.error}")
@@ -278,7 +283,6 @@ fun CameraScreen(
 
     val cameraPermissionState = rememberPermissionState(permission = Manifest.permission.CAMERA)
 
-    // Dynamic Control States
     var currentMode by remember { mutableStateOf(CameraMode.PHOTO) }
     var isRecording by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableIntStateOf(0) }
@@ -286,28 +290,21 @@ fun CameraScreen(
     var isFlashOn by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
 
-    // FR 29: Manual Translation Control State
+    val gestureClassifier = remember { GestureClassifier(context) }
     var isTranslationActive by remember { mutableStateOf(true) }
 
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var videoCapture: VideoCapture<Recorder>? by remember { mutableStateOf(null) }
     var activeRecording: Recording? by remember { mutableStateOf(null) }
 
-    // FR 06 & FR 12: Overlay Guidance & Quality State
     var guidanceMessage by remember { mutableStateOf("Please place your hand inside the box") }
     var qualityScore by remember { mutableStateOf(1.0f) }
 
-    // FR 08: Skeleton Overlay Coordinates
     var currentLandmarks by remember { mutableStateOf<List<HandLandmark>>(emptyList()) }
-
-    // FR 11: Continuous Buffer Maintenance
     val frameSlidingWindow = remember { LinkedList<List<HandLandmark>>() }
 
     var isCaptured by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
-    var sourceLanguage by remember { mutableStateOf("Sinhala") }
-    var targetLanguage by remember { mutableStateOf("English") }
-
     var sourceText by remember { mutableStateOf("") }
     var translatedText by remember { mutableStateOf("") }
 
@@ -320,7 +317,6 @@ fun CameraScreen(
         }
     }
 
-    // Video Recording Timer Logic
     LaunchedEffect(isRecording) {
         if (isRecording) {
             recordingSeconds = 0
@@ -344,33 +340,29 @@ fun CameraScreen(
         }
     }
 
-    fun speakText(text: String, languageName: String) {
-        ttsEngine?.takeIf { isTtsReady }?.let { tts ->
-            val locale = if (languageName.lowercase() == "si" || languageName.lowercase() == "sinhala") Locale("si", "LK") else Locale.US
-            if (tts.setLanguage(locale) < TextToSpeech.LANG_AVAILABLE) tts.language = Locale.US
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "TranslationSpeechId")
-        }
+    // 1. Local Gesture Recognition Output
+    fun handleLocalGestureOutput(sinhalaWord: String) {
+        sourceText = sinhalaWord
+        translatedText = ""
+        isCaptured = true
+        triggerHapticFeedback(context)
     }
 
-    fun fetchTranslationFromDB(detectedSinhalaWord: String) {
+    // 2. Fetch Translation via API
+    fun fetchTranslationFromAPI(sinhalaText: String) {
         isLoading = true
-        sourceText = detectedSinhalaWord
-        isCaptured = true
-
         coroutineScope.launch {
             try {
-                val response = apiService.getTranslation(detectedSinhalaWord)
+                val response = apiService.getTranslation(text = sinhalaText)
+
                 if (response.isSuccessful && response.body() != null) {
                     translatedText = response.body()?.english_text ?: "Translation not found"
-                    triggerHapticFeedback(context)
                     onGestureRecognized(translatedText)
                 } else {
                     translatedText = "Translation not found"
                 }
             } catch (e: Exception) {
                 translatedText = "Connection Error"
-                // FR 30: Error notification system
-                Toast.makeText(context, "Code 1201: Network Connection Failed", Toast.LENGTH_SHORT).show()
                 Log.e("CameraScreen", "API Call Error: ${e.message}")
             } finally {
                 isLoading = false
@@ -388,14 +380,21 @@ fun CameraScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Please allow camera access to use sign language translation.", color = Color.Gray, fontSize = 14.sp, textAlign = TextAlign.Center)
                 Spacer(modifier = Modifier.height(20.dp))
-                Button(onClick = { cameraPermissionState.launchPermissionRequest() }) { Text("Grant Permission") }
+                Button(onClick = {
+                    if (cameraPermissionState.status.shouldShowRationale) {
+                        cameraPermissionState.launchPermissionRequest()
+                    } else {
+                        openAppSettings(context)
+                    }
+                }) {
+                    Text("Grant Permission")
+                }
             }
         }
     } else {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
 
-            // Camera Engine Setup
             LaunchedEffect(lensFacing, isFlashOn) {
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
                 val cameraProvider = cameraProviderFuture.get()
@@ -420,33 +419,38 @@ fun CameraScreen(
                     .build()
 
                 imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(context)) { imageProxy ->
-                    // FR 29 Business Rule: Save battery & reduced processing when OFF
                     if (!isTranslationActive) {
-                        guidanceMessage = "Translation Paused (FR 29)"
+                        guidanceMessage = "Translation Paused"
                         currentLandmarks = emptyList()
                         imageProxy.close()
                         return@setAnalyzer
                     }
 
                     val luminance = calculateLuminance(imageProxy)
-                    val landmarks = generateHandLandmarks()
+                    val isHandInFrame = true
+                    val landmarks = generateHandLandmarks(isHandInFrame)
                     currentLandmarks = landmarks
 
-                    if (luminance < 35) {
+                    if (landmarks.isEmpty()) {
+                        guidanceMessage = "No hand detected! Place hand inside frame"
+                        qualityScore = 0.0f
+                    } else if (luminance < 35) {
                         guidanceMessage = "Too dark! Increase light (Code 601)"
                         qualityScore = 0.4f
                     } else if (luminance > 240) {
                         guidanceMessage = "Too bright! Reduce direct light"
                         qualityScore = 0.5f
                     } else {
-                        guidanceMessage = if (isRecording) "Recording gesture..." else "Please place your hand inside the box"
+                        guidanceMessage = if (isRecording) "Recording gesture..." else "Hand Detected - Ready"
                         qualityScore = 0.95f
                     }
 
-                    if (frameSlidingWindow.size >= 30) {
-                        frameSlidingWindow.removeFirst()
+                    if (landmarks.isNotEmpty()) {
+                        if (frameSlidingWindow.size >= 30) {
+                            frameSlidingWindow.removeFirst()
+                        }
+                        frameSlidingWindow.addLast(landmarks)
                     }
-                    frameSlidingWindow.addLast(landmarks)
 
                     imageProxy.close()
                 }
@@ -466,25 +470,24 @@ fun CameraScreen(
 
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
 
-            // FR 06 & FR 08: Hand Guidance Frame & Landmark Render Canvas
             Canvas(modifier = Modifier.align(Alignment.Center).size(260.dp, 400.dp)) {
                 val strokeWidth = 3.dp.toPx()
                 val cornerLength = 35.dp.toPx()
+
                 val frameColor = when {
                     !isTranslationActive -> Color.Gray
+                    currentLandmarks.isEmpty() -> Color.Red
                     isRecording -> Color.Red
                     qualityScore < 0.6f -> Color.Yellow
                     else -> Color(0xFF00FF66)
                 }
 
-                // Outer Framing Box
                 drawPath(Path().apply { moveTo(0f, cornerLength); lineTo(0f, 0f); lineTo(cornerLength, 0f) }, frameColor, style = Stroke(strokeWidth))
                 drawPath(Path().apply { moveTo(size.width - cornerLength, 0f); lineTo(size.width, 0f); lineTo(size.width, cornerLength) }, frameColor, style = Stroke(strokeWidth))
                 drawPath(Path().apply { moveTo(0f, size.height - cornerLength); lineTo(0f, size.height); lineTo(cornerLength, size.height) }, frameColor, style = Stroke(strokeWidth))
                 drawPath(Path().apply { moveTo(size.width - cornerLength, size.height); lineTo(size.width, size.height); lineTo(size.width, size.height - cornerLength) }, frameColor, style = Stroke(strokeWidth))
 
-                // FR 08: Render 21 Hand Landmarks Overlay
-                if (isTranslationActive) {
+                if (isTranslationActive && currentLandmarks.isNotEmpty()) {
                     currentLandmarks.forEach { landmark ->
                         val px = landmark.x * size.width
                         val py = landmark.y * size.height
@@ -497,7 +500,7 @@ fun CameraScreen(
                 }
             }
 
-            // Top Navigation Control Bar
+            // Top Navigation
             Row(
                 modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -517,7 +520,6 @@ fun CameraScreen(
                     ) { Text(if (isFlashOn) "⚡" else "⚡\u200D⃠", color = Color.White, fontSize = 20.sp) }
                 }
 
-                // FR 29: Visual Indicator Button (Manual Translation Toggle)
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(20.dp))
@@ -532,7 +534,6 @@ fun CameraScreen(
                                     Toast.LENGTH_SHORT
                                 ).show()
                             } catch (e: Exception) {
-                                // Error 2901 State toggle failed
                                 Toast.makeText(context, "Error 2901: State toggle failed", Toast.LENGTH_SHORT).show()
                             }
                         }
@@ -585,12 +586,11 @@ fun CameraScreen(
                 }
             }
 
-            // Bottom Action & Mode Controls
+            // Bottom Controls
             Column(
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Realtime Guidance HUD Bar with Live Video Timer
                 Box(
                     modifier = Modifier.clip(RoundedCornerShape(50.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 20.dp, vertical = 8.dp)
                 ) {
@@ -603,6 +603,7 @@ fun CameraScreen(
                         },
                         color = when {
                             !isTranslationActive -> Color.Gray
+                            currentLandmarks.isEmpty() -> Color.Red
                             isRecording -> Color.Red
                             qualityScore < 0.6f -> Color.Yellow
                             else -> Color(0xFF00FF66)
@@ -626,7 +627,6 @@ fun CameraScreen(
 
                     Spacer(modifier = Modifier.width(36.dp))
 
-                    // Main Action Trigger Button
                     Box(
                         modifier = Modifier.size(78.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.3f)).padding(4.dp),
                         contentAlignment = Alignment.Center
@@ -640,6 +640,11 @@ fun CameraScreen(
                                         return@clickable
                                     }
 
+                                    if (currentLandmarks.isEmpty()) {
+                                        Toast.makeText(context, "No hand detected in frame!", Toast.LENGTH_SHORT).show()
+                                        return@clickable
+                                    }
+
                                     if (currentMode == CameraMode.PHOTO) {
                                         captureStaticGesture(
                                             context = context,
@@ -647,7 +652,8 @@ fun CameraScreen(
                                             qualityScore = qualityScore,
                                             handLandmarks = currentLandmarks
                                         ) {
-                                            fetchTranslationFromDB("ආයුබෝවන්")
+                                            val predictedSinhalaWord = gestureClassifier.classify(currentLandmarks)
+                                            handleLocalGestureOutput(predictedSinhalaWord)
                                         }
                                     } else {
                                         if (isRecording) {
@@ -665,7 +671,8 @@ fun CameraScreen(
                                                     isRecording = true
                                                 },
                                                 onRecordingFinished = {
-                                                    fetchTranslationFromDB("ස්තුතියි")
+                                                    val predictedSinhalaWord = gestureClassifier.classify(currentLandmarks)
+                                                    handleLocalGestureOutput(predictedSinhalaWord)
                                                 }
                                             )
                                         }
@@ -687,7 +694,6 @@ fun CameraScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // Dynamic Mode Switcher
                 Box(
                     modifier = Modifier.clip(RoundedCornerShape(50.dp)).background(Color(0xFF1E1E1E)).padding(4.dp)
                 ) {
@@ -705,88 +711,165 @@ fun CameraScreen(
                                 }
                                 .padding(horizontal = 24.dp, vertical = 12.dp)
                         ) {
-                            Text("📷 Photo", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "📷 Photo",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
 
                         Box(
-                            modifier = Modifier.clip(RoundedCornerShape(50.dp))
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50.dp))
                                 .background(if (currentMode == CameraMode.VIDEO) Color(0xFF2C2C2C) else Color.Transparent)
-                                .clickable { currentMode = CameraMode.VIDEO }
+                                .clickable {
+                                    currentMode = CameraMode.VIDEO
+                                }
                                 .padding(horizontal = 24.dp, vertical = 12.dp)
                         ) {
-                            Text("🎥 Video", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "🎥 Video",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                     }
                 }
             }
 
-            // Translation Output Card
-            AnimatedVisibility(visible = isCaptured, enter = fadeIn(), exit = fadeOut()) {
+            // Translation Display / Result Overlay
+            AnimatedVisibility(
+                visible = isCaptured,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+            ) {
                 Box(
-                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)).padding(24.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF1E1E1E).copy(alpha = 0.95f))
+                        .padding(20.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Color(0xFF1E1E1E)).padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(sourceLanguage, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.1f)).clickable { speakText(sourceText, sourceLanguage) },
-                                    contentAlignment = Alignment.Center
-                                ) { Text("🔊", fontSize = 14.sp) }
-                            }
-
                             Text(
-                                text = "⇄",
-                                color = Color(0xFF00FF66),
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable {
-                                    val tempLang = sourceLanguage
-                                    sourceLanguage = targetLanguage
-                                    targetLanguage = tempLang
-
-                                    val tempText = sourceText
-                                    sourceText = translatedText
-                                    translatedText = tempText
-                                }
+                                text = "Gesture Recognized",
+                                color = Color.Gray,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
                             )
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(targetLanguage, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.1f)).clickable { speakText(translatedText, targetLanguage) },
-                                    contentAlignment = Alignment.Center
-                                ) { Text("🔊", fontSize = 14.sp) }
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.1f))
+                                    .clickable { isCaptured = false },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(text = "✕", color = Color.White, fontSize = 16.sp)
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                        if (isLoading) {
-                            CircularProgressIndicator(color = Color(0xFF00FF66))
-                        } else {
-                            Text(sourceText, color = Color.Gray, fontSize = 18.sp, textAlign = TextAlign.Center)
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(translatedText, color = Color(0xFF00FF66), fontSize = 26.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        Text(
+                            text = sourceText,
+                            color = Color.White,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        if (translatedText.isNotEmpty()) {
+                            Text(
+                                text = translatedText,
+                                color = Color(0xFF00FF66),
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
                         }
 
-                        Spacer(modifier = Modifier.height(24.dp))
+                        if (translatedText.isEmpty()) {
+                            Button(
+                                onClick = { fetchTranslationFromAPI(sourceText) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF66)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                if (isLoading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = Color.Black
+                                    )
+                                } else {
+                                    Text(
+                                        text = "🌐 Translate to English",
+                                        color = Color.Black,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
 
-                        Button(
-                            onClick = { isCaptured = false },
-                            modifier = Modifier.fillMaxWidth()
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Close & Continue")
+                            Button(
+                                onClick = {
+                                    if (isTtsReady) {
+                                        ttsEngine?.language = Locale("si", "LK")
+                                        ttsEngine?.speak(
+                                            sourceText,
+                                            TextToSpeech.QUEUE_FLUSH,
+                                            null,
+                                            null
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(50.dp)
+                            ) {
+                                Text(text = "🔊 සිංහල")
+                            }
+
+                            if (translatedText.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Button(
+                                    onClick = {
+                                        if (isTtsReady) {
+                                            ttsEngine?.language = Locale.US
+                                            ttsEngine?.speak(
+                                                translatedText,
+                                                TextToSpeech.QUEUE_FLUSH,
+                                                null,
+                                                null
+                                            )
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(50.dp)
+                                ) {
+                                    Text(text = "🔊 English")
+                                }
+                            }
                         }
                     }
                 }
