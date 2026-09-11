@@ -1,0 +1,23 @@
+{
+  "model_type": "CNN_BiLSTM_MobileNetV2",
+  "input_shape": [
+    30,
+    224,
+    224,
+    3
+  ],
+  "num_classes": 7,
+  "class_names": [
+    "100-1 million",
+    "20-99",
+    "A-Z",
+    "Additional words",
+    "Months",
+    "SSL Sentences",
+    "Verbs"
+  ],
+  "training_epochs": 30,
+  "batch_size": 4,
+  "final_val_accuracy": 0.8999999761581421,
+  "model_path": "/content/drive/MyDrive/SSL new/models/CNN_BiLSTM_Sinhala_Dynamic.keras"
+}
