@@ -380,7 +380,7 @@ Department of Computing, Faculty of Applied Sciences, Rajarata University of Sri
 
 - **Project Title:** Real-Time Sinhala Sign Language Translation into Sinhala–English Text and Speech using Artificial Intelligence
 - **Course Code:** ICT3411 / COM3405 – ICT / CS Group Project
-- **Academic Year:** 2024 / 2025
+- **Academic Year:** 2021 / 2022
 - **Department:** Department of Computing
 - **Faculty:** Faculty of Applied Sciences
 - **Institution:** Rajarata University of Sri Lanka
