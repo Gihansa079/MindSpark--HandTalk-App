@@ -44,6 +44,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.mindspark2.ApiService
+import com.example.mindspark2.getMediaUrl
 import com.example.mindspark2.PreferencesManager
 import com.example.mindspark2.ui.theme.Mindspark2Theme
 import kotlinx.coroutines.launch
@@ -234,7 +235,7 @@ fun LearnScreen(
     val context = LocalContext.current
     val favoriteManager = remember { LocalFavoriteManager(context) }
 
-    val categories = listOf("All", "Favorites ⭐", "Alphabet", "Numbers", "Months", "Verbs", "SSL Sentences", "Additional Words")
+    val categories = listOf("All", "Static Gestures", "Dynamic Gestures", "Favorites ⭐")
     var selectedCategory by remember { mutableStateOf("All") }
 
     var signList by remember { mutableStateOf<List<SignItem>>(emptyList()) }
@@ -251,46 +252,45 @@ fun LearnScreen(
         errorMessage = null
         coroutineScope.launch {
             try {
-                val response = apiService.getAllTranslations()
+                val staticResponse = apiService.getStaticGestures()
+                val dynamicResponse = apiService.getDynamicGestures()
                 val savedFavSet = favoriteManager.getFavoriteSet()
 
-                if (response.isSuccessful && response.body() != null) {
-                    val dbList = response.body()!!
-
-                    signList = dbList.map { translation ->
-                        val english = translation.english_text?.trim() ?: "N/A"
-                        val sinhala = translation.sinhala_text?.trim() ?: "N/A"
-                        val url = translation.image_url ?: ""
-
-                        val category = when {
-                            url.contains("/A-Z/", ignoreCase = true) -> "Alphabet"
-                            url.contains("/20-99/", ignoreCase = true) ||
-                                    url.contains("/100-1%20million/", ignoreCase = true) ||
-                                    url.contains("/100-1 million/", ignoreCase = true) -> "Numbers"
-                            url.contains("/Months/", ignoreCase = true) -> "Months"
-                            url.contains("/Verbs/", ignoreCase = true) -> "Verbs"
-                            url.contains("/SSL%20Sentences/", ignoreCase = true) ||
-                                    url.contains("/SSL Sentences/", ignoreCase = true) -> "SSL Sentences"
-                            url.contains("/Additional%20words/", ignoreCase = true) ||
-                                    url.contains("/Additional words/", ignoreCase = true) -> "Additional Words"
-                            else -> "Additional Words"
-                        }
-
-                        val isFav = savedFavSet.contains(english.lowercase())
-
+                val staticList = if (staticResponse.isSuccessful) {
+                    staticResponse.body().orEmpty().map { gesture ->
+                        val english = gesture.englishText.trim()
                         SignItem(
-                            translationId = translation.id,
-                            dbImageUrl = translation.image_url,
+                            translationId = gesture.gestureId,
+                            dbImageUrl = gesture.imagePath,
                             englishText = english,
-                            sinhalaText = sinhala,
-                            category = category,
-                            isFavorite = isFav
+                            sinhalaText = gesture.sinhalaText.trim(),
+                            category = "Static Gestures",
+                            isFavorite = savedFavSet.contains(english.lowercase())
                         )
                     }
-                } else {
-                    errorMessage = "Server Error (${response.code()}): Unable to fetch sign data."
+                } else emptyList()
+
+                val dynamicList = if (dynamicResponse.isSuccessful) {
+                    dynamicResponse.body().orEmpty().map { gesture ->
+                        val english = gesture.englishText.trim()
+                        SignItem(
+                            translationId = gesture.gestureId,
+                            dbImageUrl = gesture.videoPath,
+                            englishText = english,
+                            sinhalaText = gesture.sinhalaText.trim(),
+                            category = "Dynamic Gestures",
+                            isFavorite = savedFavSet.contains(english.lowercase())
+                        )
+                    }
+                } else emptyList()
+
+                signList = staticList + dynamicList
+
+                if (!staticResponse.isSuccessful || !dynamicResponse.isSuccessful) {
+                    errorMessage = "Server Error: Static ${staticResponse.code()}, Dynamic ${dynamicResponse.code()}"
                 }
             } catch (e: Exception) {
+                Log.e("LearnActivity", "Failed to fetch gestures", e)
                 errorMessage = "Network Error: Please check your connection and retry."
             } finally {
                 isLoading = false
@@ -515,14 +515,9 @@ fun LearnScreen(
 
             val rawMediaUrls = currentSign.dbImageUrl
                 ?.split(",")
-                ?.map { url ->
-                    url.trim()
-                        .replace("localhost", "10.0.2.2")
-                        .replace(" ", "%20")
-                        .replace("(", "%28")
-                        .replace(")", "%29")
-                }
-                ?.filter { it.isNotEmpty() } ?: emptyList()
+                ?.mapNotNull { path -> getMediaUrl(path) }
+                ?.filter { it.isNotBlank() }
+                ?: emptyList()
 
             AlertDialog(
                 onDismissRequest = { selectedSign = null },

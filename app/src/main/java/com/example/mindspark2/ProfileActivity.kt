@@ -210,16 +210,66 @@ class ProfileActivity : ComponentActivity() {
      * Logout වීමේදී Preferences සහ Local Database Clear කර Login Screen එකට Redirect කිරීම.
      */
     private fun performLogout() {
-        prefsManager.clearSession()
-        lifecycleScope.launch(Dispatchers.IO) {
-            database.userDao().clearUserProfile()
+        lifecycleScope.launch {
+            val token = prefsManager.sessionToken
+
+            try {
+                if (!token.isNullOrBlank()) {
+                    withContext(Dispatchers.IO) {
+                        val response = apiService.logoutUser(
+                            "Bearer $token"
+                        )
+
+                        android.util.Log.d(
+                            "LOGOUT_TEST",
+                            "Response code: ${response.code()}"
+                        )
+
+                        if (!response.isSuccessful) {
+                            android.util.Log.e(
+                                "LOGOUT_TEST",
+                                "Logout failed: ${response.errorBody()?.string()}"
+                            )
+                        } else {
+                            android.util.Log.d(
+                                "LOGOUT_TEST",
+                                "Backend logout request successful"
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(
+                    "ProfileActivity",
+                    "Server logout request failed",
+                    e
+                )
+            } finally {
+                // Clear local authentication even if network is unavailable
+                withContext(Dispatchers.IO) {
+                    database.userDao().clearUserProfile()
+                }
+
+                prefsManager.clearSession()
+
+                Toast.makeText(
+                    this@ProfileActivity,
+                    "Logged out successfully",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                val intent = Intent(
+                    this@ProfileActivity,
+                    LoginActivity::class.java
+                ).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TASK
+                }
+
+                startActivity(intent)
+                finish()
+            }
         }
-        Toast.makeText(this, "Logged out successfully", Toast.LENGTH_SHORT).show()
-        val intent = Intent(this, LoginActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        startActivity(intent)
-        finish()
     }
 }
 
@@ -554,7 +604,11 @@ fun ProfileScreen(
                             title = "About Us",
                             textColor = primaryTextColor,
                             onClick = {
-                                Toast.makeText(context, "MindSpark2 v1.0", Toast.LENGTH_SHORT).show()
+                                val intent = Intent(
+                                    context,
+                                    AboutUsActivity::class.java
+                                )
+                                context.startActivity(intent)
                             }
                         )
                         HorizontalDivider()

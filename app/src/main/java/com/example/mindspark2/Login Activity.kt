@@ -10,6 +10,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,6 +35,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import com.example.mindspark2.PreferencesManager
 
 /**
  * LoginActivity: පරිශීලකයා පද්ධතියට ඇතුළු වීම (Login Verification),
@@ -75,8 +83,32 @@ class LoginActivity : ComponentActivity() {
 
                                 if (response.isSuccessful) {
                                     // FR 02 & FR 39: Encrypted Preferences හි Session Data සුරැකීම
+
+                                    val userId = response.body()?.userId
+
+                                    if (userId == null || userId <= 0) {
+                                        withContext(Dispatchers.Main) {
+                                            onLoadingChange(false)
+                                            onError("User ID not received from server")
+                                        }
+                                        return@launch
+                                    }
+                                    val sessionToken = response.body()?.sessionToken
+
+                                    if (sessionToken.isNullOrBlank()) {
+                                        withContext(Dispatchers.Main) {
+                                            onLoadingChange(false)
+                                            onError("Session token not received from server")
+                                        }
+                                        return@launch
+                                    }
+
+
                                     prefsManager.userEmail = email
+                                    prefsManager.userId = userId
+                                    prefsManager.sessionToken = sessionToken
                                     prefsManager.lastLoginTime = System.currentTimeMillis()
+
 
                                     // Username එක API එකෙන් නොලැබුනහොත් Email එකෙන් සාදා ගැනීම
                                     val userName = response.body()?.userName ?: email.substringBefore("@")
@@ -96,9 +128,15 @@ class LoginActivity : ComponentActivity() {
                                         onLoadingChange(false)
                                         Toast.makeText(this@LoginActivity, "Login Successful!", Toast.LENGTH_SHORT).show()
 
-                                        val intent = Intent(this@LoginActivity, HomeActivity::class.java).apply {
+
+                                        val intent = Intent(
+                                            this@LoginActivity,
+                                            HomeActivity::class.java
+                                        ).apply {
                                             putExtra("USER_NAME", userName)
+                                            putExtra("USER_ID", userId)
                                         }
+
                                         startActivity(intent)
                                         finish() // LoginActivity එක පැමිණි Stack එකෙන් ඉවත් කිරීම
                                     }
@@ -138,10 +176,7 @@ class LoginActivity : ComponentActivity() {
     }
 }
 
-/**
- * LoginScreen: Jetpack Compose මගින් Login Screen එකේ UI එක, Animations,
- * TextFields සහ Client-side Validations සකස් කිරීම.
- */
+/** Modern HandTalk login UI. Authentication remains in LoginActivity. */
 @Composable
 fun LoginScreen(
     onBackClick: () -> Unit,
@@ -149,259 +184,177 @@ fun LoginScreen(
     onRegisterClick: () -> Unit,
     onLoginSubmit: (String, String, (Boolean) -> Unit, (String) -> Unit) -> Unit
 ) {
-    // Input Fields සහ Screen States පාලනය කරන Variables
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var isPasswordVisible by remember { mutableStateOf(false) } // Password එක Show/Hide කිරීම
-    var errorMessage by remember { mutableStateOf<String?>(null) } // Error Messages පෙන්වීමට
-    var isLoading by remember { mutableStateOf(false) } // Progress Indicator පාලනයට
-    var isAccountLocked by remember { mutableStateOf(false) } // ගිණුම Lock වී ඇත්දැයි බලන State එක
+    var isPasswordVisible by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember { mutableStateOf(false) }
+    var isAccountLocked by remember { mutableStateOf(false) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.White)
-    ) {
-        // පසුබිමේ ඇති මෝස්තර රවුම් (Background Canvas Circles) නිර්මාණය කිරීම
-        Canvas(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            // වම් පස පහළ රවුම
+    val navy = Color(0xFF08346D)
+    val yellow = Color(0xFFFFD54F)
+    val gradient = Brush.verticalGradient(
+        listOf(Color(0xFF064A96), Color(0xFF1787D6), Color(0xFF65CBF6))
+    )
+
+    Box(Modifier.fillMaxSize().background(gradient)) {
+        Canvas(Modifier.fillMaxSize()) {
             drawCircle(
-                color = Color(0xFFD0E3FA),
-                radius = 300f,
-                center = Offset(0f, size.height)
+                color = Color.White.copy(alpha = 0.10f),
+                radius = size.width * 0.75f,
+                center = Offset(size.width * 0.05f, size.height * 0.95f)
             )
-
-            // දකුණු පස ඉහළ රවුම
             drawCircle(
-                color = Color(0xFFE6F1FD),
-                radius = 240f,
-                center = Offset(size.width, 0f)
+                color = Color.White.copy(alpha = 0.12f),
+                radius = size.width * 0.65f,
+                center = Offset(size.width * 1.08f, size.height * 0.52f)
             )
         }
 
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(25.dp)
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(25.dp))
-
-            // Back Arrow Button (ආපසු යාමට)
             Text(
                 text = "←",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .clickable { onBackClick() }
+                fontSize = 28.sp,
+                color = Color.White,
+                modifier = Modifier.align(Alignment.Start).clickable { onBackClick() }
                     .padding(8.dp)
             )
-
-            Spacer(modifier = Modifier.height(15.dp))
-
-            // Screen Header Title
-            Text(
-                text = "Login",
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
-
-            // FR 30: Error Alert Message පෙන්වන කොටස
-            errorMessage?.let { msg ->
-                Spacer(modifier = Modifier.height(15.dp))
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Color(0xFFFFEBEE),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text(
-                        text = msg,
-                        color = Color(0xFFD32F2F),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(10.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(30.dp))
-
-            // Email Label & Input Field
-            Text(
-                text = "Email",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = email,
-                onValueChange = {
-                    email = it
-                    errorMessage = null // Type කරන විට Error Message එක ඉවත් කිරීම
-                },
-                placeholder = { Text("Enter your email") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !isLoading && !isAccountLocked, // Account locked හෝ Loading නම් Disable වේ
-                shape = RoundedCornerShape(22.dp)
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Password Label & Input Field (Show/Hide Toggle සමඟ)
-            Text(
-                text = "Password",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = {
-                    password = it
-                    errorMessage = null
-                },
-                placeholder = { Text("Enter your password") },
-                // Password එක පෙනෙන/නොපෙනෙන ලෙස සැකසීම
-                visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    TextButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
-                        Text(
-                            text = if (isPasswordVisible) "Hide" else "Show",
-                            color = Color(0xFF1565C0),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !isLoading && !isAccountLocked,
-                shape = RoundedCornerShape(22.dp)
-            )
-
-            Spacer(modifier = Modifier.height(15.dp))
-
-            // Forgot Password Button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier.size(94.dp).clip(CircleShape).background(Color.White),
+                contentAlignment = Alignment.Center
             ) {
-                TextButton(
-                    onClick = onForgotPasswordClick,
-                    enabled = !isLoading
-                ) {
-                    Text(
-                        "Forgot Password?",
-                        color = Color(0xFF1565C0)
-                    )
-                }
+                Text("🤟", fontSize = 57.sp)
             }
+            Spacer(Modifier.height(12.dp))
+            Text("HandTalk", color = yellow, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(12.dp))
+            Text("Welcome Back", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text("Login to continue", color = Color.White.copy(alpha = 0.92f), fontSize = 15.sp)
+            Spacer(Modifier.height(26.dp))
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Login Submit Button
-            Button(
-                onClick = {
-                    // FR 01 & FR 02: Client-side Input Validations පරීක්ෂා කිරීම
-                    val cleanEmail = email.trim()
-                    val cleanPassword = password.trim()
-
-                    when {
-                        // Empty Inputs Check
-                        cleanEmail.isEmpty() || cleanPassword.isEmpty() -> {
-                            errorMessage = "Please enter both Email and Password"
-                        }
-                        // Email Format Check
-                        !android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches() -> {
-                            errorMessage = "Please enter a valid email address"
-                        }
-                        // Password Length Check (අක්ෂර 8-64 අතර)
-                        cleanPassword.length < 8 || cleanPassword.length > 64 -> {
-                            errorMessage = "Password length must be between 8 and 64 characters"
-                        }
-                        // Validations සාර්ථක නම් Submit කිරීම
-                        else -> {
-                            errorMessage = null
-                            onLoginSubmit(
-                                cleanEmail,
-                                cleanPassword,
-                                { loading -> isLoading = loading },
-                                { err ->
-                                    errorMessage = err
-                                    // 203 Code එකෙන් හෝ Lock Message එකෙන් Account එක Lock වූ බව හඳුනා ගැනීම
-                                    if (err.contains("locked", ignoreCase = true) || err.contains("203")) {
-                                        isAccountLocked = true
-                                    }
-                                }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp),
+                color = Color.White,
+                shadowElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 26.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    errorMessage?.let { msg ->
+                        Surface(
+                            color = Color(0xFFFFEBEE),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                msg, color = Color(0xFFB71C1C), fontSize = 13.sp,
+                                modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center
                             )
                         }
+                        Spacer(Modifier.height(14.dp))
                     }
-                },
-                enabled = !isLoading && !isAccountLocked,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(55.dp),
-                shape = RoundedCornerShape(15.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isAccountLocked) Color.Gray else Color(0xFF1565C0)
-                )
-            ) {
-                // Request එක සිදු වන විට Progress Spinner එක පෙන්වීම
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        modifier = Modifier.size(24.dp)
+
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it; errorMessage = null },
+                        label = { Text("Email") },
+                        placeholder = { Text("Enter your email") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !isLoading && !isAccountLocked,
+                        shape = RoundedCornerShape(16.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
                     )
-                } else {
-                    Text(
-                        text = if (isAccountLocked) "Account Locked" else "Login",
-                        fontSize = 18.sp,
-                        color = Color.White
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it; errorMessage = null },
+                        label = { Text("Password") },
+                        placeholder = { Text("Enter your password") },
+                        visualTransformation = if (isPasswordVisible) VisualTransformation.None
+                        else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            TextButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                                Text(if (isPasswordVisible) "Hide" else "Show", color = navy)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !isLoading && !isAccountLocked,
+                        shape = RoundedCornerShape(16.dp)
                     )
+                    TextButton(
+                        onClick = onForgotPasswordClick,
+                        enabled = !isLoading,
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Forgot Password?", color = Color(0xFF1554B7))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            val cleanEmail = email.trim()
+                            val cleanPassword = password.trim()
+                            when {
+                                cleanEmail.isEmpty() || cleanPassword.isEmpty() ->
+                                    errorMessage = "Please enter both Email and Password"
+                                !android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches() ->
+                                    errorMessage = "Please enter a valid email address"
+                                cleanPassword.length < 8 || cleanPassword.length > 64 ->
+                                    errorMessage = "Password length must be between 8 and 64 characters"
+                                else -> {
+                                    errorMessage = null
+                                    onLoginSubmit(cleanEmail, cleanPassword,
+                                        { loading -> isLoading = loading },
+                                        { err ->
+                                            errorMessage = err
+                                            if (err.contains("locked", ignoreCase = true) || err.contains("203")) {
+                                                isAccountLocked = true
+                                            }
+                                        })
+                                }
+                            }
+                        },
+                        enabled = !isLoading && !isAccountLocked,
+                        modifier = Modifier.fillMaxWidth().height(54.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = yellow,
+                            contentColor = navy,
+                            disabledContainerColor = Color.LightGray
+                        )
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp), color = navy, strokeWidth = 3.dp
+                            )
+                        } else {
+                            Text(if (isAccountLocked) "Account Locked" else "Login",
+                                fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(24.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Don't have an account?", color = Color(0xFF53617B), fontSize = 14.sp)
+                        TextButton(onClick = onRegisterClick, enabled = !isLoading) {
+                            Text("Sign Up", color = Color(0xFF1554B7), fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Register Activity වෙත යාමට Navigation Link එක
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = "Don't have an account? ")
-
-                TextButton(
-                    onClick = onRegisterClick,
-                    enabled = !isLoading
-                ) {
-                    Text(
-                        text = "Register",
-                        color = Color(0xFF1565C0),
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // App Footer Label
+            Spacer(Modifier.height(26.dp))
             Text(
-                text = "HandTalk",
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center,
-                color = Color.Gray,
-                fontSize = 14.sp
+                "Breaking Communication Barriers",
+                color = Color.White, fontSize = 13.sp,
+                textAlign = TextAlign.Center
             )
-
-            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 }

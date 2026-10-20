@@ -56,16 +56,26 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.LinkedList
 import java.util.Locale
+import java.io.File
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.graphics.Matrix
+import com.example.mindspark2.HistoryRequest
+import com.example.mindspark2.RecognitionSaveRequest
+import com.example.mindspark2.legal.LegalPagesActivity
+import com.example.mindspark2.DynamicGestureClassifier
+
 
 enum class CameraMode {
     PHOTO, VIDEO
 }
 
-data class HandLandmark(val x: Float, val y: Float)
+data class HandLandmark(val x: Float, val y: Float, val z: Float )
 
-// ==========================================
+
 // Helper Functions & Quality Analyzers
-// ==========================================
 
 fun triggerHapticFeedback(context: Context) {
     val vibrator = ContextCompat.getSystemService(context, Vibrator::class.java)
@@ -130,21 +140,44 @@ fun calculateLuminance(imageProxy: ImageProxy): Double {
     return sum.toDouble() / (data.size / 16)
 }
 
-fun generateHandLandmarks(isHandInFrame: Boolean): List<HandLandmark> {
-    if (!isHandInFrame) return emptyList()
+fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+    return try {
+        val bitmap = imageProxy.toBitmap()
 
-    val landmarks = mutableListOf<HandLandmark>()
-    for (i in 0 until 21) {
-        val x = (0.25f + (i % 5) * 0.12f).coerceIn(0.1f, 0.9f)
-        val y = (0.25f + (i / 5) * 0.13f).coerceIn(0.1f, 0.9f)
-        landmarks.add(HandLandmark(x, y))
+        val rotationDegrees =
+            imageProxy.imageInfo.rotationDegrees
+
+        if (rotationDegrees == 0) {
+            bitmap
+        } else {
+            val matrix = Matrix().apply {
+                postRotate(rotationDegrees.toFloat())
+            }
+
+            Bitmap.createBitmap(
+                bitmap,
+                0,
+                0,
+                bitmap.width,
+                bitmap.height,
+                matrix,
+                true
+            )
+        }
+
+    } catch (e: Exception) {
+        Log.e(
+            "CameraScreen",
+            "ImageProxy to Bitmap conversion failed",
+            e
+        )
+        null
     }
-    return landmarks
 }
 
-// ==========================================
+
 // Static Gesture Capture
-// ==========================================
+
 fun captureStaticGesture(
     context: Context,
     imageCapture: ImageCapture?,
@@ -221,42 +254,43 @@ fun recordDynamicGesture(
         return
     }
 
-    if (frameBuffer.size < 20) {
-        Toast.makeText(context, "Error 1002: Insufficient frames (Min 20 required)", Toast.LENGTH_SHORT).show()
-        return
-    }
 
     val capture = videoCapture ?: run {
         Toast.makeText(context, "Error 1001: Recording failed", Toast.LENGTH_SHORT).show()
         return
     }
 
-    val name = "HandTalk_LSTM_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())}.mp4"
-    val contentValues = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-        put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/HandTalk")
-        }
-    }
-
-    val mediaStoreOutput = MediaStoreOutputOptions.Builder(
-        context.contentResolver,
-        MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-    ).setContentValues(contentValues).build()
+    // Keep video in app cache only. Only prediction text is saved to History.
+    val temporaryVideo = File.createTempFile("handtalk_dynamic_", ".mp4", context.cacheDir)
+    val fileOutput = FileOutputOptions.Builder(temporaryVideo).build()
 
     val recording = capture.output
-        .prepareRecording(context, mediaStoreOutput)
+        .prepareRecording(context, fileOutput)
         .start(ContextCompat.getMainExecutor(context)) { event ->
             when (event) {
                 is VideoRecordEvent.Finalize -> {
                     if (!event.hasError()) {
-                        val savedUri = event.outputResults.outputUri
-                        Toast.makeText(context, "Frames Processed", Toast.LENGTH_SHORT).show()
+                        val savedUri = Uri.fromFile(temporaryVideo)
+
+                        Log.d("DynamicRecording", "Video saved: $savedUri")
+
+                        // Temporary recording is ready for inference; not added to Gallery.
+
                         onRecordingFinished(savedUri)
+
                     } else {
-                        Log.e("CameraX", "Video recording error: ${event.error}")
-                        Toast.makeText(context, "Error 1001: Recording failed", Toast.LENGTH_SHORT).show()
+                        Log.e(
+                            "DynamicRecording",
+                            "Recording failed. Code: ${event.error}",
+                            event.cause
+                        )
+                        temporaryVideo.delete()
+
+                        Toast.makeText(
+                            context,
+                            "Recording failed: ${event.error}",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
             }
@@ -264,7 +298,6 @@ fun recordDynamicGesture(
 
     onRecordingStarted(recording)
 }
-
 // ==========================================
 // Main Composable
 // ==========================================
@@ -274,12 +307,46 @@ fun recordDynamicGesture(
 fun CameraScreen(
     navController: NavController,
     onGestureRecognized: (String) -> Unit,
+    userId: Int,
     apiService: ApiService = ApiService.create()
-) {
+)
+{
     val context = LocalContext.current
     val activity = context as? Activity
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
+
+    // Store only successfully translated recognition results.
+    suspend fun saveRecognitionHistory(
+        sinhalaText: String,
+        englishText: String,
+        inputType: String,
+        recognitionType: String = "static"
+    ) {
+        if (userId <= 0) {
+            Log.w("History", "Valid user ID unavailable")
+            return
+        }
+        try {
+            val response = apiService.saveHistory(
+                HistoryRequest(
+                    userId = userId,
+                    englishText = englishText,
+                    sinhalaText = sinhalaText,
+                    // Both current photo/video paths use the static GestureClassifier.
+                    recognitionType = recognitionType,
+                    inputType = inputType
+                )
+            )
+            if (response.isSuccessful) {
+                Log.d("History", "History saved for user $userId")
+            } else {
+                Log.e("History", "Save failed HTTP ${response.code()}: ${response.errorBody()?.string()}")
+            }
+        } catch (e: Exception) {
+            Log.e("History", "Save failed", e)
+        }
+    }
 
     val cameraPermissionState = rememberPermissionState(permission = Manifest.permission.CAMERA)
 
@@ -290,7 +357,6 @@ fun CameraScreen(
     var isFlashOn by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
 
-    val gestureClassifier = remember { GestureClassifier(context) }
     var isTranslationActive by remember { mutableStateOf(true) }
 
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
@@ -303,10 +369,35 @@ fun CameraScreen(
     var currentLandmarks by remember { mutableStateOf<List<HandLandmark>>(emptyList()) }
     val frameSlidingWindow = remember { LinkedList<List<HandLandmark>>() }
 
+    val staticPredictionWindow = remember {
+        LinkedList<GesturePrediction>()
+    }
+
+    val gestureClassifier = remember { GestureClassifier(context) }
+
+    val dynamicGestureClassifier = remember {
+        DynamicGestureClassifier(context)
+    }
+    val handLandmarkerHelper = remember {
+        HandLandmarkerHelper(
+            context = context,
+            onResult = { landmarks ->
+                currentLandmarks = landmarks
+            },
+            onError = { errorMessage ->
+                Log.e(
+                    "CameraScreen",
+                    "MediaPipe Error: $errorMessage"
+                )
+            }
+        )
+    }
+
     var isCaptured by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var sourceText by remember { mutableStateOf("") }
     var translatedText by remember { mutableStateOf("") }
+    var recognizedInputType by remember { mutableStateOf("camera") }
 
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
     var isTtsReady by remember { mutableStateOf(false) }
@@ -340,30 +431,127 @@ fun CameraScreen(
         }
     }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            handLandmarkerHelper.close()
+            gestureClassifier.close()
+            dynamicGestureClassifier.close()
+        }
+    }
+// Sinhala translations for Dynamic Gesture labels
+    val dynamicSinhalaLabels = mapOf(
+        "Assent" to "එකඟයි",
+        "Good Evening" to "සුබ සන්ධ්‍යාවක්",
+        "Good Morning" to "සුබ උදෑසනක්",
+        "Good Night" to "සුබ රාත්‍රියක්",
+        "Please" to "කරුණාකර",
+        "Sorry" to "සමාවෙන්න",
+        "Thank you" to "ස්තූතියි",
+        "Today" to "අද",
+        "Yesterday" to "ඊයේ",
+        "welcome" to "සාදරයෙන් පිළිගනිමු"
+    )
+
     // 1. Local Gesture Recognition Output
     fun handleLocalGestureOutput(sinhalaWord: String) {
         sourceText = sinhalaWord
         translatedText = ""
         isCaptured = true
         triggerHapticFeedback(context)
+
+        // Save each successful prediction automatically, independent of Translate.
+        // Do not save unknown or empty recognition results.
+        if (sinhalaWord.isBlank() || sinhalaWord == "නොදන්නා සංඥාවකි") return
+        val inputTypeAtPrediction = recognizedInputType
+        val isDynamic = inputTypeAtPrediction == "video"
+        coroutineScope.launch {
+            val englishWord = if (isDynamic) {
+                dynamicSinhalaLabels.entries.firstOrNull { it.value == sinhalaWord }?.key
+            } else {
+                try {
+                    val response = apiService.getStaticGestures()
+                    if (response.isSuccessful) {
+                        response.body()?.firstOrNull {
+                            it.sinhalaText.trim() == sinhalaWord.trim()
+                        }?.englishText
+                    } else null
+                } catch (e: Exception) {
+                    Log.w("History", "Static English label lookup failed", e)
+                    null
+                }
+            }
+            saveRecognitionHistory(
+                sinhalaText = sinhalaWord,
+                // History API expects both fields; History screen shows Sinhala only.
+                englishText = englishWord ?: sinhalaWord,
+                inputType = inputTypeAtPrediction,
+                recognitionType = if (isDynamic) "dynamic" else "static"
+            )
+        }
     }
 
     // 2. Fetch Translation via API
     fun fetchTranslationFromAPI(sinhalaText: String) {
+        if (isLoading || sinhalaText.isBlank()) return
+
+        // Dynamic gesture translation
+        if (recognizedInputType == "video") {
+            val englishWord = dynamicSinhalaLabels.entries
+                .firstOrNull {
+                    it.value.trim() == sinhalaText.trim()
+                }?.key
+
+            if (englishWord != null) {
+                translatedText = englishWord
+
+            } else {
+                translatedText = "Translation not found"
+            }
+
+            return
+        }
+
         isLoading = true
+
         coroutineScope.launch {
             try {
-                val response = apiService.getTranslation(text = sinhalaText)
+                val response = apiService.getStaticGestures()
 
-                if (response.isSuccessful && response.body() != null) {
-                    translatedText = response.body()?.english_text ?: "Translation not found"
-                    onGestureRecognized(translatedText)
+                if (response.isSuccessful) {
+                    val gesture = response.body()?.find {
+                        it.sinhalaText.trim() == sinhalaText.trim()
+                    }
+
+                    if (gesture != null) {
+                        translatedText = gesture.englishText
+
+                        val saveResponse = apiService.saveRecognition(
+                            RecognitionSaveRequest(
+                                userId = userId,
+                                gestureId = gesture.gestureId,
+                                gestureType = "static",
+                                confidenceScore = null
+                            )
+                        )
+
+                        if (!saveResponse.isSuccessful) {
+                            Log.e(
+                                "CameraScreen",
+                                "Recognition save failed: ${saveResponse.code()}"
+                            )
+                        }
+
+                        onGestureRecognized(gesture.englishText)
+                    } else {
+                        translatedText = "Translation not found"
+                    }
                 } else {
-                    translatedText = "Translation not found"
+                    translatedText = "Server error: ${response.code()}"
                 }
+
             } catch (e: Exception) {
                 translatedText = "Connection Error"
-                Log.e("CameraScreen", "API Call Error: ${e.message}")
+                Log.e("CameraScreen", "API Call Error", e)
             } finally {
                 isLoading = false
             }
@@ -393,7 +581,11 @@ fun CameraScreen(
         }
     } else {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+            val previewView = remember {
+                PreviewView(context).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                }
+            }
 
             LaunchedEffect(lensFacing, isFlashOn) {
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -426,33 +618,65 @@ fun CameraScreen(
                         return@setAnalyzer
                     }
 
-                    val luminance = calculateLuminance(imageProxy)
-                    val isHandInFrame = true
-                    val landmarks = generateHandLandmarks(isHandInFrame)
-                    currentLandmarks = landmarks
+                    try {
+                        val luminance = calculateLuminance(imageProxy)
+                        val bitmap = imageProxyToBitmap(imageProxy)
 
-                    if (landmarks.isEmpty()) {
-                        guidanceMessage = "No hand detected! Place hand inside frame"
-                        qualityScore = 0.0f
-                    } else if (luminance < 35) {
-                        guidanceMessage = "Too dark! Increase light (Code 601)"
-                        qualityScore = 0.4f
-                    } else if (luminance > 240) {
-                        guidanceMessage = "Too bright! Reduce direct light"
-                        qualityScore = 0.5f
-                    } else {
-                        guidanceMessage = if (isRecording) "Recording gesture..." else "Hand Detected - Ready"
-                        qualityScore = 0.95f
-                    }
+                        if (bitmap != null) {
 
-                    if (landmarks.isNotEmpty()) {
-                        if (frameSlidingWindow.size >= 30) {
-                            frameSlidingWindow.removeFirst()
+                            // Keep existing hand detection for Static Recognition
+                            handLandmarkerHelper.detect(bitmap)
+
+                            // Dynamic frames are read from the saved video after recording.
+                            // Keep live hand detection unchanged for Static Recognition.
+
+                            bitmap.recycle()
                         }
-                        frameSlidingWindow.addLast(landmarks)
-                    }
+                        if (currentLandmarks.isEmpty()) {
+                            guidanceMessage = "No hand detected! Place hand inside frame"
+                            qualityScore = 0.0f
+                        } else if (luminance < 35) {
+                            guidanceMessage = "Too dark! Increase light (Code 601)"
+                            qualityScore = 0.4f
+                        } else if (luminance > 240) {
+                            guidanceMessage = "Too bright! Reduce direct light"
+                            qualityScore = 0.5f
+                        } else {
+                            guidanceMessage = if (isRecording) "Recording gesture..." else "Hand Detected - Ready"
+                            qualityScore = 0.95f
+                        }
 
-                    imageProxy.close()
+
+                        if (currentLandmarks.isNotEmpty()) {
+                            if (frameSlidingWindow.size >= 30) {
+                                frameSlidingWindow.removeFirst()
+                            }
+                            frameSlidingWindow.addLast(currentLandmarks)
+                        }
+
+// Static prediction smoothing
+                        if (currentMode == CameraMode.PHOTO &&
+                            currentLandmarks.size == 21) {
+
+                            val prediction = gestureClassifier.classifyWithDetails(
+                                currentLandmarks
+                            )
+
+                            if (prediction != null) {
+                                if (staticPredictionWindow.size >= 5) {
+                                    staticPredictionWindow.removeFirst()
+                                }
+                                staticPredictionWindow.addLast(prediction)
+                            }
+                        } else {
+                            staticPredictionWindow.clear()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CameraScreen", "Image analysis error", e)
+                        currentLandmarks = emptyList()
+                    } finally {
+                        imageProxy.close()
+                    }
                 }
 
                 try {
@@ -463,12 +687,34 @@ fun CameraScreen(
                     if (camera.cameraInfo.hasFlashUnit()) {
                         camera.cameraControl.enableTorch(isFlashOn)
                     }
+
                 } catch (e: Exception) {
                     Toast.makeText(context, "Camera Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
 
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            // Draw MediaPipe landmarks over the FULL camera preview
+            Canvas(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (
+                    isTranslationActive &&
+                    currentLandmarks.size == 21
+                ) {
+                    currentLandmarks.forEach { landmark ->
+
+                        val px = landmark.x * size.width
+                        val py = landmark.y * size.height
+
+                        drawCircle(
+                            color = Color(0xFF00FF66),
+                            radius = 4.dp.toPx(),
+                            center = Offset(px, py)
+                        )
+                    }
+                }
+            }
 
             Canvas(modifier = Modifier.align(Alignment.Center).size(260.dp, 400.dp)) {
                 val strokeWidth = 3.dp.toPx()
@@ -487,17 +733,6 @@ fun CameraScreen(
                 drawPath(Path().apply { moveTo(0f, size.height - cornerLength); lineTo(0f, size.height); lineTo(cornerLength, size.height) }, frameColor, style = Stroke(strokeWidth))
                 drawPath(Path().apply { moveTo(size.width - cornerLength, size.height); lineTo(size.width, size.height); lineTo(size.width, size.height - cornerLength) }, frameColor, style = Stroke(strokeWidth))
 
-                if (isTranslationActive && currentLandmarks.isNotEmpty()) {
-                    currentLandmarks.forEach { landmark ->
-                        val px = landmark.x * size.width
-                        val py = landmark.y * size.height
-                        drawCircle(
-                            color = Color(0xFF00FF66),
-                            radius = 4.dp.toPx(),
-                            center = Offset(px, py)
-                        )
-                    }
-                }
             }
 
             // Top Navigation
@@ -560,7 +795,10 @@ fun CameraScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier.size(40.dp).clip(CircleShape).clickable {
-                            context.startActivity(Intent(context, HistoryActivity::class.java))
+                            val intent = Intent(context, HistoryActivity::class.java).apply {
+                                putExtra("USER_ID", userId)
+                            }
+                            context.startActivity(intent)
                         },
                         contentAlignment = Alignment.Center
                     ) { Text("🕒", color = Color.White, fontSize = 18.sp) }
@@ -579,8 +817,47 @@ fun CameraScreen(
                         ) {
                             DropdownMenuItem(text = { Text("Send Feedback", color = Color.Black) }, onClick = { showMenu = false; sendFeedback(context) })
                             DropdownMenuItem(text = { Text("Manage permissions", color = Color.Black) }, onClick = { showMenu = false; openAppSettings(context) })
-                            DropdownMenuItem(text = { Text("Privacy Policy", color = Color.Black) }, onClick = { showMenu = false; openWebUrl(context, "https://mindspark.com/privacy-policy") })
-                            DropdownMenuItem(text = { Text("Terms of Service", color = Color.Black) }, onClick = { showMenu = false; openWebUrl(context, "https://mindspark.com/terms-of-service") })
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Privacy Policy", color = Color.Black)
+                                },
+                                onClick = {
+                                    showMenu = false
+
+                                    val intent = Intent(
+                                        context,
+                                        LegalPagesActivity::class.java
+                                    ).apply {
+                                        putExtra(
+                                            LegalPagesActivity.EXTRA_PAGE,
+                                            LegalPagesActivity.PAGE_PRIVACY
+                                        )
+                                    }
+
+                                    context.startActivity(intent)
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Terms of Service", color = Color.Black)
+                                },
+                                onClick = {
+                                    showMenu = false
+
+                                    val intent = Intent(
+                                        context,
+                                        LegalPagesActivity::class.java
+                                    ).apply {
+                                        putExtra(
+                                            LegalPagesActivity.EXTRA_PAGE,
+                                            LegalPagesActivity.PAGE_TERMS
+                                        )
+                                    }
+
+                                    context.startActivity(intent)
+                                }
+                            )
                         }
                     }
                 }
@@ -640,20 +917,81 @@ fun CameraScreen(
                                         return@clickable
                                     }
 
-                                    if (currentLandmarks.isEmpty()) {
-                                        Toast.makeText(context, "No hand detected in frame!", Toast.LENGTH_SHORT).show()
+                                    if (
+                                        currentLandmarks.isEmpty() &&
+                                        !(currentMode == CameraMode.VIDEO && isRecording)
+                                    ) {
+                                        Toast.makeText(
+                                            context,
+                                            "No hand detected in frame!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
                                         return@clickable
                                     }
-
                                     if (currentMode == CameraMode.PHOTO) {
+                                        // Validate before showing a prediction or saving a photo.
+                                        val capturedLandmarks = currentLandmarks.toList()
+                                        if (capturedLandmarks.size < 21) {
+                                            Toast.makeText(context, "No hand detected in frame!", Toast.LENGTH_SHORT).show()
+                                            return@clickable
+                                        }
+                                        if (qualityScore < 0.6f) {
+                                            Toast.makeText(context, "Quality insufficient. Improve lighting.", Toast.LENGTH_SHORT).show()
+                                            return@clickable
+                                        }
+                                        if (imageCapture == null) {
+                                            Toast.makeText(context, "Camera not ready yet", Toast.LENGTH_SHORT).show()
+                                            return@clickable
+                                        }
+
+                                        // Start saving the photo without waiting for onImageSaved
+                                        // to run inference. The saved image is still kept in Gallery.
                                         captureStaticGesture(
                                             context = context,
                                             imageCapture = imageCapture,
                                             qualityScore = qualityScore,
-                                            handLandmarks = currentLandmarks
-                                        ) {
-                                            val predictedSinhalaWord = gestureClassifier.classify(currentLandmarks)
-                                            handleLocalGestureOutput(predictedSinhalaWord)
+                                            handLandmarks = capturedLandmarks
+                                        ) { savedUri ->
+                                            Log.d("CameraScreen", "Photo saved: $savedUri")
+                                        }
+
+                                        // Show the recognition result immediately from the
+                                        // landmarks captured at the button press.
+                                        recognizedInputType = "camera"
+                                        val recentPredictions = staticPredictionWindow.toList()
+
+                                        val prediction = if (recentPredictions.size >= 5) {
+
+                                            val grouped = recentPredictions.groupBy {
+                                                it.classIndex
+                                            }
+
+                                            val majority = grouped.maxByOrNull {
+                                                it.value.size
+                                            }
+
+                                            if (majority != null && majority.value.size >= 4) {
+                                                majority.value.maxByOrNull {
+                                                    it.confidence
+                                                }
+                                            } else {
+                                                null
+                                            }
+
+                                        } else {
+                                            null
+                                        }
+                                        if (prediction != null) {
+                                            Log.d(
+                                                "StaticModelTest",
+                                                "Class Index: ${prediction.classIndex}, " +
+                                                        "Sinhala Word: ${prediction.sinhalaText}, " +
+                                                        "Confidence: ${prediction.confidence}"
+                                            )
+                                            handleLocalGestureOutput(prediction.sinhalaText)
+                                        } else {
+                                            Log.w("StaticModelTest", "No confident prediction")
+                                            handleLocalGestureOutput("නොදන්නා සංඥාවකි")
                                         }
                                     } else {
                                         if (isRecording) {
@@ -670,9 +1008,85 @@ fun CameraScreen(
                                                     activeRecording = recording
                                                     isRecording = true
                                                 },
-                                                onRecordingFinished = {
-                                                    val predictedSinhalaWord = gestureClassifier.classify(currentLandmarks)
-                                                    handleLocalGestureOutput(predictedSinhalaWord)
+                                                onRecordingFinished = { savedUri ->
+                                                    Log.d("DynamicTest", "Recording finished: $savedUri")
+                                                    // Do not display a hardcoded result. Wait for the CNN+LSTM prediction.
+                                                    recognizedInputType = "video"
+                                                    translatedText = ""
+                                                    isCaptured = false
+                                                    Toast.makeText(context, "Processing recorded gesture...", Toast.LENGTH_SHORT).show()
+                                                    coroutineScope.launch(Dispatchers.Default) {
+                                                        val frames = mutableListOf<Bitmap>()
+                                                        val retriever = MediaMetadataRetriever()
+                                                        try {
+                                                            retriever.setDataSource(context, savedUri)
+                                                            val durationMs = retriever.extractMetadata(
+                                                                MediaMetadataRetriever.METADATA_KEY_DURATION
+                                                            )?.toLongOrNull() ?: 0L
+                                                            require(durationMs > 0L) { "Video has no valid duration" }
+
+                                                            // Diagnostic test: compare normal vs horizontally mirrored video.
+                                                            // Keep the original output until training orientation is confirmed.
+                                                            val durationUs = durationMs * 1000L
+                                                            val mirroredFrames = mutableListOf<Bitmap>()
+                                                            try {
+                                                                for (i in 0 until 30) {
+                                                                    // Uniform chronological sampling, avoiding exact first/last frame.
+                                                                    val timeUs = durationUs * (2L * i + 1L) / 60L
+                                                                    val frame = retriever.getFrameAtTime(
+                                                                        timeUs,
+                                                                        MediaMetadataRetriever.OPTION_CLOSEST
+                                                                    ) ?: throw IllegalStateException("Cannot extract frame $i")
+                                                                    try {
+                                                                        val scaled = Bitmap.createScaledBitmap(frame, 128, 128, true)
+                                                                        try {
+                                                                            val normal = scaled.copy(Bitmap.Config.ARGB_8888, false)
+                                                                                ?: error("Cannot copy frame $i")
+                                                                            frames.add(normal)
+                                                                            val flip = Matrix().apply { preScale(-1f, 1f) }
+                                                                            mirroredFrames.add(
+                                                                                Bitmap.createBitmap(
+                                                                                    normal, 0, 0, 128, 128, flip, true
+                                                                                )
+                                                                            )
+                                                                        } finally {
+                                                                            if (scaled !== frame) scaled.recycle()
+                                                                        }
+                                                                    } finally {
+                                                                        frame.recycle()
+                                                                    }
+                                                                }
+                                                                Log.d("DynamicModelTest", "Video frames extracted: ${frames.size}")
+                                                                val prediction = dynamicGestureClassifier.predict(frames)
+                                                                Log.d("DynamicModelTest", "NORMAL: ${prediction.label}, confidence=${prediction.confidence}")
+                                                                val mirrorPrediction = dynamicGestureClassifier.predict(mirroredFrames)
+                                                                Log.d("DynamicModelTest", "MIRRORED: ${mirrorPrediction.label}, confidence=${mirrorPrediction.confidence}")
+                                                                // Do NOT automatically pick the highest confidence;
+                                                                // the correct orientation must match training data.
+                                                                withContext(Dispatchers.Main) {
+                                                                    val sinhalaWord = dynamicSinhalaLabels.entries
+                                                                        .firstOrNull { it.key.equals(prediction.label.trim(), ignoreCase = true) }
+                                                                        ?.value ?: "නොදන්නා සංඥාවකි"
+                                                                    handleLocalGestureOutput(sinhalaWord)
+                                                                }
+                                                            } finally {
+                                                                mirroredFrames.forEach { if (!it.isRecycled) it.recycle() }
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            Log.e("DynamicModelTest", "Dynamic video inference failed", e)
+                                                            withContext(Dispatchers.Main) {
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    "Dynamic recognition failed: ${e.message}",
+                                                                    Toast.LENGTH_LONG
+                                                                ).show()
+                                                            }
+                                                        } finally {
+                                                            retriever.release()
+                                                            frames.forEach { if (!it.isRecycled) it.recycle() }
+                                                            savedUri.path?.let { File(it).delete() }
+                                                        }
+                                                    }
                                                 }
                                             )
                                         }
@@ -810,6 +1224,7 @@ fun CameraScreen(
                         if (translatedText.isEmpty()) {
                             Button(
                                 onClick = { fetchTranslationFromAPI(sourceText) },
+                                enabled = !isLoading,
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF66)),
                                 shape = RoundedCornerShape(12.dp)
                             ) {

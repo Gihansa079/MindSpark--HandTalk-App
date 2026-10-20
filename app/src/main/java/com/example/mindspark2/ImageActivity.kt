@@ -3,8 +3,13 @@ package com.example.mindspark2.image
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.MediaController
@@ -37,8 +42,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import com.example.mindspark2.DynamicGestureClassifier
 import com.example.mindspark2.ApiService
+import com.example.mindspark2.PreferencesManager
+import com.example.mindspark2.HistoryRequest
+import com.example.mindspark2.RecognitionSaveRequest
 import com.example.mindspark2.ProfileActivity
+import com.example.mindspark2.camera.GestureClassifier
+import com.example.mindspark2.camera.HandLandmark
+import com.example.mindspark2.camera.HandLandmarkerHelper
 import com.example.mindspark2.ui.theme.Mindspark2Theme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -105,8 +117,11 @@ class ImageActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             isTtsReady = true
+            tts?.setSpeechRate(1.0f)
+            Log.d("TTS", "Voice engine ready")
         } else {
-            Log.e("TTS", "Initialization Failed!")
+            isTtsReady = false
+            Log.e("TTS", "Voice initialization failed")
         }
     }
 
@@ -190,6 +205,24 @@ fun uriToFile(context: Context, uri: Uri): File? {
     }
 }
 
+// Converts a selected gallery image into an upright Bitmap for MediaPipe.
+@Suppress("DEPRECATION")
+fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
+    return try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } else {
+            MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+        }
+    } catch (e: Exception) {
+        Log.e("ImageActivity", "Unable to decode selected image", e)
+        null
+    }
+}
+
 @Composable
 fun MediaTranslationScreen(
     currentVoiceGender: String,
@@ -200,12 +233,56 @@ fun MediaTranslationScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val apiService = remember { ApiService.create() }
+    val prefsManager = remember { PreferencesManager(context) }
+
+    val gestureClassifier = remember { GestureClassifier(context) }
+    val dynamicGestureClassifier = remember { DynamicGestureClassifier(context) }
+    val dynamicSinhalaLabels = remember {
+        mapOf(
+            "Assent" to "එකඟයි",
+            "Good Evening" to "සුබ සන්ධ්‍යාවක්",
+            "Good Morning" to "සුබ උදෑසනක්",
+            "Good Night" to "සුබ රාත්‍රියක්",
+            "Please" to "කරුණාකර",
+            "Sorry" to "සමාවෙන්න",
+            "Thank you" to "ස්තූතියි",
+            "Today" to "අද",
+            "Yesterday" to "ඊයේ",
+            "welcome" to "සාදරයෙන් පිළිගනිමු"
+        )
+    }
+
+    var detectedLandmarks by remember {
+        mutableStateOf<List<HandLandmark>>(emptyList())
+    }
+
+    val handLandmarkerHelper = remember {
+        HandLandmarkerHelper(
+            context = context,
+            onResult = { landmarks ->
+                detectedLandmarks = landmarks
+                Log.d("ImageActivity", "MediaPipe landmarks = ${landmarks.size}")
+            },
+            onError = { error ->
+                Log.e("ImageActivity", "MediaPipe error: $error")
+            }
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            handLandmarkerHelper.close()
+            gestureClassifier.close()
+            dynamicGestureClassifier.close()
+        }
+    }
 
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
     var selectedMediaType by remember { mutableStateOf<MediaType?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var englishTranslation by remember { mutableStateOf<String?>(null) }
     var sinhalaTranslation by remember { mutableStateOf<String?>(null) }
+    var showEnglishTranslation by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
@@ -222,6 +299,7 @@ fun MediaTranslationScreen(
 
             englishTranslation = null
             sinhalaTranslation = null
+            showEnglishTranslation = false
             errorMessage = null
         }
     }
@@ -371,43 +449,167 @@ fun MediaTranslationScreen(
 
             Button(
                 onClick = {
-                    if (selectedMediaUri == null) {
-                        Toast.makeText(context, "Please select an image or video first!", Toast.LENGTH_SHORT).show()
+                    val mediaUri = selectedMediaUri
+
+                    if (mediaUri == null) {
+                        Toast.makeText(
+                            context,
+                            "Please select an image or video first!",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     } else {
                         isProcessing = true
                         errorMessage = null
+                        englishTranslation = null
+                        sinhalaTranslation = null
+                        showEnglishTranslation = false
 
-                        coroutineScope.launch(Dispatchers.IO) {
+                        coroutineScope.launch {
                             try {
-                                val file = uriToFile(context, selectedMediaUri!!)
-                                if (file != null) {
-                                    val mimeType = context.contentResolver.getType(selectedMediaUri!!) ?: "media/*"
-                                    val requestFile = file.asRequestBody(mimeType.toMediaTypeOrNull())
-                                    val body = MultipartBody.Part.createFormData("media", file.name, requestFile)
+                                if (selectedMediaType == MediaType.IMAGE) {
+                                    // IMAGE FLOW:
+                                    // Gallery image -> MediaPipe -> 21 landmarks ->
+                                    // GestureClassifier -> Sinhala -> API -> English
+                                    val bitmap = withContext(Dispatchers.IO) {
+                                        uriToBitmap(context, mediaUri)
+                                    }
 
-                                    val response = apiService.translateMedia(body)
+                                    if (bitmap == null) {
+                                        errorMessage = "Unable to read selected image."
+                                        return@launch
+                                    }
 
-                                    withContext(Dispatchers.Main) {
-                                        if (response.isSuccessful && response.body() != null) {
-                                            englishTranslation = response.body()?.english_text ?: "Thank You"
-                                            sinhalaTranslation = response.body()?.sinhala_text ?: "ස්තූතියි"
-                                        } else {
-                                            errorMessage = "Processing failed. Please try again."
+                                    detectedLandmarks = emptyList()
+
+                                    // HandLandmarkerHelper uses RunningMode.IMAGE, so detect()
+                                    // completes synchronously and calls onResult before returning.
+                                    handLandmarkerHelper.detect(bitmap)
+
+                                    val landmarksSnapshot = detectedLandmarks.toList()
+
+                                    if (landmarksSnapshot.size != 21) {
+                                        errorMessage = "No hand sign detected in this image."
+                                        return@launch
+                                    }
+
+                                    val prediction = gestureClassifier.classifyWithDetails(landmarksSnapshot)
+                                    if (prediction == null) {
+                                        errorMessage = "Unknown sign or low-confidence prediction."
+                                        return@launch
+                                    }
+
+                                    // classIndex is the model's LabelEncoder index, NOT a database gesture_id.
+                                    // Resolve it using static_gestures.class_label.
+                                    val gesturesResponse = apiService.getStaticGestures()
+                                    if (!gesturesResponse.isSuccessful) {
+                                        errorMessage = "Cannot load gesture labels (HTTP ${gesturesResponse.code()})."
+                                        return@launch
+                                    }
+                                    val gesture = gesturesResponse.body()
+                                        ?.firstOrNull { it.classLabel == prediction.classIndex }
+                                    if (gesture == null) {
+                                        errorMessage = "No static gesture mapped to class ${prediction.classIndex}. Check static_gestures.class_label."
+                                        return@launch
+                                    }
+
+                                    val english = gesture.englishText
+                                    val sinhala = gesture.sinhalaText
+                                    englishTranslation = english
+                                    sinhalaTranslation = sinhala
+
+                                    val userId = prefsManager.userId
+                                    if (userId <= 0) {
+                                        errorMessage = "Translation shown, but please log in to save history."
+                                        return@launch
+                                    }
+
+                                    // The current history.translation_id FK points to the OLD translations table.
+                                    // Keep it null; do not assign translation_new.translation_id to that FK.
+                                    try {
+                                        val recognitionResult = apiService.saveRecognition(
+                                            RecognitionSaveRequest(
+                                                userId = userId,
+                                                gestureId = gesture.gestureId,
+                                                gestureType = "static",
+                                                confidenceScore = prediction.confidence.toDouble()
+                                            )
+                                        )
+                                        if (!recognitionResult.isSuccessful) {
+                                            Log.e("ImageActivity", "Save recognition HTTP ${recognitionResult.code()}")
                                         }
+                                        val historyResult = apiService.saveHistory(
+                                            HistoryRequest(
+                                                userId = userId,
+                                                translationId = null,
+                                                englishText = english,
+                                                sinhalaText = sinhala,
+                                                recognitionType = "static",
+                                                inputType = "image",
+                                                confidenceScore = prediction.confidence.toDouble()
+                                            )
+                                        )
+                                        if (!historyResult.isSuccessful) {
+                                            errorMessage = "Translation shown, but saving history failed (HTTP ${historyResult.code()})."
+                                        }
+                                    } catch (saveError: Exception) {
+                                        Log.e("ImageActivity", "Saving recognition/history failed", saveError)
+                                        errorMessage = "Translation shown, but saving to the server failed."
                                     }
                                 } else {
-                                    withContext(Dispatchers.Main) {
-                                        errorMessage = "Unable to read selected media file."
+                                    // VIDEO FLOW: gallery video -> 30 frames -> CNN+LSTM TFLite.
+                                    // No backend /translate-media endpoint is needed for inference.
+                                    val frames = withContext(Dispatchers.Default) {
+                                        extractDynamicVideoFrames(context, mediaUri)
+                                    }
+                                    val prediction = try {
+                                        withContext(Dispatchers.Default) {
+                                            dynamicGestureClassifier.predict(frames)
+                                        }
+                                    } finally {
+                                        frames.forEach { if (!it.isRecycled) it.recycle() }
+                                    }
+                                    Log.d("ImageActivity", "Dynamic prediction: ${prediction.label} (${prediction.confidence})")
+                                    val english = prediction.label.trim()
+                                    val sinhala = dynamicSinhalaLabels.entries
+                                        .firstOrNull { it.key.equals(english, ignoreCase = true) }?.value
+                                    if (sinhala == null) {
+                                        errorMessage = "Unknown dynamic label: $english"
+                                        return@launch
+                                    }
+                                    englishTranslation = english
+                                    sinhalaTranslation = sinhala
+
+                                    // Save once when recognition succeeds. Translate button only changes UI.
+                                    val userId = prefsManager.userId
+                                    if (userId > 0) {
+                                        try {
+                                            val saved = apiService.saveHistory(
+                                                HistoryRequest(
+                                                    userId = userId,
+                                                    translationId = null,
+                                                    englishText = english,
+                                                    sinhalaText = sinhala,
+                                                    recognitionType = "dynamic",
+                                                    inputType = "video",
+                                                    confidenceScore = prediction.confidence.toDouble()
+                                                )
+                                            )
+                                            if (!saved.isSuccessful) {
+                                                errorMessage = "Result shown, but history save failed (HTTP ${saved.code()})."
+                                            }
+                                        } catch (saveError: Exception) {
+                                            Log.e("ImageActivity", "Dynamic history save failed", saveError)
+                                            errorMessage = "Result shown, but history could not be saved."
+                                        }
+                                    } else {
+                                        errorMessage = "Result shown. Please log in to save history."
                                     }
                                 }
                             } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    errorMessage = "Connection Error: ${e.message}"
-                                }
+                                Log.e("ImageActivity", "Media recognition failed", e)
+                                errorMessage = "Processing Error: ${e.message}"
                             } finally {
-                                withContext(Dispatchers.Main) {
-                                    isProcessing = false
-                                }
+                                isProcessing = false
                             }
                         }
                     }
@@ -429,13 +631,13 @@ fun MediaTranslationScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = if (selectedMediaType == MediaType.VIDEO) "Processing Video..." else "Preprocessing Image...",
+                        text = if (selectedMediaType == MediaType.VIDEO) "Processing Video..." else "Identifying Image...",
                         fontSize = 16.sp,
                         color = Color.White
                     )
                 } else {
                     Text(
-                        text = if (selectedMediaType == MediaType.VIDEO) "🔍 Translate Video" else "🔍 Translate Image",
+                        text = if (selectedMediaType == MediaType.VIDEO) "🔍 Recognize Video" else "🔍 Recognize Image",
                         fontSize = 18.sp,
                         color = Color.White
                     )
@@ -461,7 +663,7 @@ fun MediaTranslationScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Translation Result",
+                                text = "Recognition Result",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 18.sp,
                                 color = Color(0xFF042F62)
@@ -482,16 +684,25 @@ fun MediaTranslationScreen(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Text(
-                            text = "🤟 $englishTranslation",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "🤟 $sinhalaTranslation",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF042F62)
                         )
 
-                        Text(
-                            text = "සිංහල : $sinhalaTranslation",
-                            color = Color.DarkGray,
-                            fontSize = 16.sp
-                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedButton(onClick = { showEnglishTranslation = !showEnglishTranslation }) {
+                            Text(if (showEnglishTranslation) "Hide English" else "🌐 Translate to English")
+                        }
+
+                        if (showEnglishTranslation) {
+                            Text(
+                                text = englishTranslation.orEmpty().ifBlank { "English translation unavailable" },
+                                color = Color.DarkGray,
+                                fontSize = 18.sp
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(16.dp))
 
@@ -507,12 +718,14 @@ fun MediaTranslationScreen(
                                 Text("🔊 Sinhala")
                             }
 
-                            OutlinedButton(
-                                onClick = { onPlayAudio(englishTranslation!!, "en") },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Text("🔊 English")
+                            if (showEnglishTranslation && !englishTranslation.isNullOrBlank()) {
+                                OutlinedButton(
+                                    onClick = { onPlayAudio(englishTranslation!!, "en") },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("🔊 English")
+                                }
                             }
                         }
 
@@ -550,6 +763,7 @@ private fun MediaVideoPlayer(
         modifier = modifier,
         factory = { context ->
             VideoView(context).apply {
+                tag = videoUri
                 setVideoURI(videoUri)
                 val mediaController = MediaController(context)
                 mediaController.setAnchorView(this)
@@ -561,11 +775,53 @@ private fun MediaVideoPlayer(
             }
         },
         update = { videoView ->
-            videoView.setVideoURI(videoUri)
-            videoView.start()
+            if (videoView.tag != videoUri) {
+                videoView.tag = videoUri
+                videoView.setVideoURI(videoUri)
+                videoView.start()
+            }
         },
         onRelease = { videoView ->
             videoView.stopPlayback()
         }
     )
+}
+
+/** Sample exactly 30 frames, matching the CameraScreen dynamic inference preprocessing. */
+private fun extractDynamicVideoFrames(context: Context, videoUri: Uri): List<Bitmap> {
+    val retriever = MediaMetadataRetriever()
+    val frames = mutableListOf<Bitmap>()
+    try {
+        retriever.setDataSource(context, videoUri)
+        val durationMs = retriever.extractMetadata(
+            MediaMetadataRetriever.METADATA_KEY_DURATION
+        )?.toLongOrNull() ?: 0L
+        require(durationMs > 0L) { "Video has no valid duration" }
+        val durationUs = durationMs * 1000L
+        for (i in 0 until 30) {
+            val timeUs = durationUs * (2L * i + 1L) / 60L
+            val frame = retriever.getFrameAtTime(
+                timeUs, MediaMetadataRetriever.OPTION_CLOSEST
+            ) ?: throw IllegalStateException("Cannot extract frame ${i + 1}/30")
+            try {
+                val resized = Bitmap.createScaledBitmap(frame, 128, 128, true)
+                try {
+                    frames.add(
+                        resized.copy(Bitmap.Config.ARGB_8888, false)
+                            ?: throw IllegalStateException("Cannot convert frame ${i + 1}")
+                    )
+                } finally {
+                    if (resized !== frame) resized.recycle()
+                }
+            } finally {
+                if (!frame.isRecycled) frame.recycle()
+            }
+        }
+        return frames
+    } catch (e: Exception) {
+        frames.forEach { if (!it.isRecycled) it.recycle() }
+        throw e
+    } finally {
+        retriever.release()
+    }
 }

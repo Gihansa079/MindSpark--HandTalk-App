@@ -42,6 +42,7 @@ data class HistoryModel(
 @Composable
 fun HistoryScreen(
     navController: NavController,
+    userId: Int,
     apiService: ApiService = ApiService.create()
 ) {
     // Android Context එක සහ Coroutine Scope එක ලබා ගැනීම
@@ -112,39 +113,49 @@ fun HistoryScreen(
     fun fetchHistory() {
         isLoading = true
         errorMessage = null
+
         coroutineScope.launch {
             try {
-                val response = apiService.getAllTranslations()
-                if (response.isSuccessful && response.body() != null) {
-                    val dbList = response.body()!!
-                    // show_in_history true වන දත්ත පමණක් Filter කර HistoryModel වලට Map කිරීම
-                    historyList = dbList
-                        .filter { it.show_in_history == true }
-                        .map { translation ->
-                            val imageUrl = translation.image_url ?: ""
-                            val isVideo = imageUrl.contains(".mp4", ignoreCase = true) || imageUrl.contains("/video/", ignoreCase = true)
-
-                            HistoryModel(
-                                id = translation.id ?: 0,
-                                sinhalaText = translation.sinhala_text ?: "N/A",
-                                englishText = translation.english_text ?: "N/A",
-                                date = translation.created_at?.take(10) ?: "Recent",
-                                type = if (isVideo) "VIDEO" else "IMAGE"
-                            )
-                        }
-                } else {
-                    errorMessage = "Failed to load history data"
+                if (userId <= 0) {
+                    errorMessage = "Please log in again"
+                    return@launch
                 }
+
+                // Get history from the new history table
+                val response = apiService.getUserHistory(userId)
+
+                if (response.isSuccessful) {
+
+                    historyList = response.body().orEmpty().map { item ->
+                        HistoryModel(
+                            id = item.historyId,
+                            sinhalaText = item.sinhalaText ?: "N/A",
+                            englishText = item.englishText ?: "N/A",
+                            date = item.createdAt?.take(10) ?: "Recent",
+                            type = item.inputType?.uppercase() ?: "IMAGE"
+                        )
+                    }
+
+                    Log.d(
+                        "HistoryScreen",
+                        "History loaded: ${historyList.size} records"
+                    )
+
+                } else {
+                    errorMessage = "Failed to load history: ${response.code()}"
+                }
+
             } catch (e: Exception) {
-                errorMessage = "Network Error: ${e.message}"
+                Log.e("HistoryScreen", "History loading error", e)
+                errorMessage = "Connection Error: ${e.message}"
+
             } finally {
-                isLoading = false // Loading එක අවසන් කිරීම
+                isLoading = false
             }
         }
     }
-
     // Screen එක load වන විට ප්‍රථමයෙන්ම fetchHistory() ක්‍රියාත්මක කිරීම
-    LaunchedEffect(Unit) {
+    LaunchedEffect(userId) {
         fetchHistory()
     }
 
@@ -152,7 +163,10 @@ fun HistoryScreen(
     fun deleteSingleItem(item: HistoryModel) {
         coroutineScope.launch {
             try {
-                val res = apiService.hideFromHistory(item.id)
+                val res = apiService.deleteHistory(
+                    historyId = item.id,
+                    userId = userId
+                )
                 if (res.isSuccessful) {
                     // List එකෙන් එම item එක ඉවත් කර UI එක Update කිරීම
                     historyList = historyList.filter { it.id != item.id }
@@ -164,25 +178,44 @@ fun HistoryScreen(
         }
     }
 
-    // සියලුම History Items ඉවත් කිරීමේ ශ්‍රිතය
+    // Clear all history for the logged-in user
     fun clearAllHistory() {
         coroutineScope.launch {
             try {
-                val res = apiService.hideAllFromHistory()
+                val res = apiService.clearUserHistory(userId)
+
                 if (res.isSuccessful) {
-                    historyList = emptyList() // List එක සම්පූර්ණයෙන්ම හිස් කිරීම
-                    Toast.makeText(context, "History cleared", Toast.LENGTH_SHORT).show()
+                    historyList = emptyList()
+
+                    Toast.makeText(
+                        context,
+                        "History cleared successfully",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                } else {
+                    Toast.makeText(
+                        context,
+                        "Failed to clear history: ${res.code()}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
+
             } catch (e: Exception) {
-                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Log.e("HistoryScreen", "Clear history error", e)
+
+                Toast.makeText(
+                    context,
+                    "Error: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
 
     // Search Box එකේ টাইප් කරන අකුරු වලට අනුව History List එක Filter කිරීම
     val filteredHistory = historyList.filter {
-        it.englishText.contains(searchQuery, ignoreCase = true) ||
-                it.sinhalaText.contains(searchQuery, ignoreCase = true)
+        it.sinhalaText.contains(searchQuery, ignoreCase = true)
     }
 
     // Theme එක අනුව පසුබිම් වර්ණය (Gradient Background) තෝරා ගැනීම
@@ -228,7 +261,7 @@ fun HistoryScreen(
                     Spacer(modifier = Modifier.width(12.dp))
 
                     Text(
-                        text = "Translation History",
+                        text = "Recognition History",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -249,7 +282,7 @@ fun HistoryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Search translations...", color = Color.LightGray) },
+                placeholder = { Text("Search Sinhala results...", color = Color.LightGray) },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 singleLine = true,
@@ -380,7 +413,12 @@ fun HistoryItemCard(
             ) {
                 // Image ද Video ද යන්න පෙන්වීම
                 Text(
-                    text = if (item.type == "IMAGE") "🖼️ Image" else "🎥 Video",
+                    text = when (item.type) {
+                        "CAMERA" -> "📷 Camera"
+                        "IMAGE" -> "🖼️ Image"
+                        "VIDEO" -> "🎥 Video"
+                        else -> "🤟 ${item.type}"
+                    },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (isDark) Color(0xFF60A5FA) else Color(0xFF2682CC)
@@ -398,36 +436,26 @@ fun HistoryItemCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // පරිවර්තනය වූ ඉංග්‍රීසි පෙළ
+            // Display the recognized Sinhala word only.
             Text(
-                text = "🤟 ${item.englishText}",
-                fontSize = 18.sp,
+                text = "🤟 ${item.sinhalaText}",
+                fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 color = mainTextColor
             )
 
-            // පරිවර්තනය වූ සිංහල පෙළ
-            Text(
-                text = "සිංහල: ${item.sinhalaText}",
-                fontSize = 15.sp,
-                color = if (isDark) Color.LightGray else Color.DarkGray
-            )
-
             Spacer(modifier = Modifier.height(10.dp))
 
-            // ශබ්දය වාදනය කිරීමේ (Audio Playback) බොත්තම්
+            // Sinhala speech only; English is available through Translate on CameraScreen.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                // සිංහලෙන් කියවීමට
-                IconButton(onClick = { onPlayAudio(item.sinhalaText, "si") }, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🔊🇱🇰", fontSize = 14.sp)
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                // ඉංග්‍රීසියෙන් කියවීමට
-                IconButton(onClick = { onPlayAudio(item.englishText, "en") }, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🔊🇺🇸", fontSize = 14.sp)
+                IconButton(
+                    onClick = { onPlayAudio(item.sinhalaText, "si") },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Text(text = "🔊🇱🇰", fontSize = 16.sp)
                 }
             }
         }

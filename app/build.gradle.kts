@@ -110,4 +110,7 @@ dependencies {
 
     // MediaPipe Hand Landmarker Library එක
     implementation("com.google.mediapipe:tasks-vision:0.10.14")
+    implementation("com.google.mediapipe:tasks-vision:latest.release")
+
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

@@ -20,7 +20,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-
+import android.widget.Toast
 class CameraActivity : ComponentActivity() {
 
     private lateinit var ttsManager: TTSManager
@@ -29,6 +29,7 @@ class CameraActivity : ComponentActivity() {
     // Google Cloud Translate API Key එක මෙතැනට යොදන්න
     private val apiKey = "YOUR_GOOGLE_TRANSLATE_API_KEY"
 
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -36,17 +37,34 @@ class CameraActivity : ComponentActivity() {
         ttsManager = TTSManager(this)
         prefsManager = PreferencesManager(this)
 
+        val userId = intent.getIntExtra(
+            "USER_ID",
+            prefsManager.userId
+        )
+
+        if (userId <= 0) {
+            Toast.makeText(
+                this,
+                "Please login again",
+                Toast.LENGTH_SHORT
+            ).show()
+            finish()
+            return
+        }
+
         setContent {
             Mindspark2Theme {
                 val navController = rememberNavController()
 
                 CameraScreen(
                     navController = navController,
-                    onGestureRecognized = ::onGestureRecognized
+                    onGestureRecognized = ::onGestureRecognized,
+                    userId = userId
                 )
             }
         }
     }
+
 
     private fun onGestureRecognized(translatedText: String) {
         // Network Request එකක් නිසා Background Thread (Dispatchers.IO) එකක ක්‍රියාත්මක කරයි
@@ -83,7 +101,7 @@ class CameraActivity : ComponentActivity() {
             urlConnection.connectTimeout = 5000
             urlConnection.readTimeout = 5000
 
-            // Request Payload එක සකස් කිරීම (Sinhala "si" -> English "en")
+
             val jsonInput = JSONObject().apply {
                 put("q", sinhalaText)
                 put("source", "si")

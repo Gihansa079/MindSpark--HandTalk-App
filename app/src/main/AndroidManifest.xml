@@ -80,6 +80,14 @@
             android:name=".ProfileActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".legal.LegalPagesActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AboutUsActivity"
+            android:exported="false" />
+
     </application>
 
 </manifest>

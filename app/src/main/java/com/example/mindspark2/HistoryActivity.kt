@@ -36,7 +36,7 @@ data class HistoryItem(
     val englishText: String,
     val sinhalaText: String,
     val date: String,
-    val type: String, // "IMAGE" හෝ "VIDEO"
+    val type: String, // "CAMERA", "IMAGE" or "VIDEO"
     val showInHistory: Boolean = true
 )
 
@@ -65,6 +65,7 @@ class HistoryActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     // Jetpack Compose UI එක Render කිරීම
     private fun applyUI() {
         val isDark = currentTheme == "Dark"
+        val userId = intent.getIntExtra("USER_ID", -1)
 
         setContent {
             Mindspark2Theme(darkTheme = isDark) {
@@ -74,9 +75,10 @@ class HistoryActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 ) {
                     HistoryScreen(
                         isDark = isDark,
-                        onBackClick = { finish() }, // Screen එක Close කිරීම
+                        userId = userId,
+                        onBackClick = { finish() },
                         onPlayAudio = { text, lang ->
-                            speakText(text, lang) // ශබ්ද විකාශනය කිරීමේ Function එක Call කිරීම
+                            speakText(text, lang)
                         }
                     )
                 }
@@ -144,6 +146,7 @@ class HistoryActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 @Composable
 fun HistoryScreen(
     isDark: Boolean,
+    userId: Int,
     onBackClick: () -> Unit,
     onPlayAudio: (String, String) -> Unit,
     apiService: ApiService = ApiService.create()
@@ -157,80 +160,114 @@ fun HistoryScreen(
     var itemToDelete by remember { mutableStateOf<HistoryItem?>(null) }
 
     val coroutineScope = rememberCoroutineScope()
+    var isDeleting by remember { mutableStateOf(false) }
 
-    // Backend එකෙන් පරිවර්තන දත්ත ලබාගැනීමේ Function එක
+    // Load only the signed-in user's translation_history records.
+
     fun fetchHistory() {
         isLoading = true
         errorMessage = null
+
         coroutineScope.launch {
             try {
-                val response = apiService.getAllTranslations()
-                if (response.isSuccessful && response.body() != null) {
-                    val dbList = response.body()!!
-
-                    // show_in_history == true වන Records පමණක් Filter කර UI Model එකට Map කිරීම
-                    historyList = dbList
-                        .filter { it.show_in_history == true }
-                        .map { translation ->
-                            val imageUrl = translation.image_url ?: ""
-                            val isVideo = imageUrl.contains(".mp4", ignoreCase = true) || imageUrl.contains("/video/", ignoreCase = true)
-
-                            HistoryItem(
-                                id = translation.id?.toString() ?: "",
-                                englishText = translation.english_text ?: "N/A",
-                                sinhalaText = translation.sinhala_text ?: "N/A",
-                                date = translation.created_at?.take(10) ?: "Recent",
-                                type = if (isVideo) "VIDEO" else "IMAGE",
-                                showInHistory = translation.show_in_history ?: true
-                            )
-                        }
-                } else {
-                    errorMessage = "Failed to load history from DB"
+                if (userId <= 0) {
+                    errorMessage = "Please login again"
+                    return@launch
                 }
+
+                val response = apiService.getUserHistory(userId)
+
+                if (response.isSuccessful) {
+                    historyList = response.body().orEmpty().map { record ->
+                        HistoryItem(
+                            id = record.historyId.toString(),
+                            englishText = record.englishText ?: "",
+                            sinhalaText = record.sinhalaText ?: "",
+                            date = record.createdAt?.take(10) ?: "Recent",
+                            type = when (record.inputType?.lowercase()) {
+                                "video" -> "VIDEO"
+                                "camera" -> "CAMERA"
+                                else -> "IMAGE"
+                            }
+                        )
+                    }
+                } else {
+                    errorMessage =
+                        "Failed to load history (HTTP ${response.code()})"
+                }
+
             } catch (e: Exception) {
-                errorMessage = "Network Error: ${e.message}"
+                Log.e("HistoryScreen", "Load failed", e)
+                errorMessage = "Network error: ${e.message}"
             } finally {
                 isLoading = false
             }
         }
     }
 
-    // Screen එක Load වන විට දත්ත Fetch කිරීම
-    LaunchedEffect(Unit) {
+
+    LaunchedEffect(userId) {
         fetchHistory()
     }
 
-    // Soft delete logic: Backend Database එකේ show_in_history = false කිරීම
+    // Delete one row by history_id, scoped to the current user.
     fun deleteSingleItem(item: HistoryItem) {
+        if (userId <= 0 || isDeleting) return
+        val historyId = item.id.toIntOrNull() ?: return
+        isDeleting = true
         coroutineScope.launch {
             try {
-                val itemId = item.id.toIntOrNull() ?: 0
-                val response = apiService.hideFromHistory(itemId)
+                val response = apiService.deleteHistory(historyId, userId)
                 if (response.isSuccessful) {
-                    historyList = historyList.filter { it.id != item.id }
-                    Toast.makeText(context, "Item removed from history", Toast.LENGTH_SHORT).show()
+                    historyList = historyList.filterNot { it.id == item.id }
+                    Toast.makeText(context, "History item removed", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "Failed to hide item in DB", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Delete failed (HTTP ${response.code()})", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Log.e("HistoryScreen", "Delete failed", e)
+                Toast.makeText(context, "Delete error: ${e.message}", Toast.LENGTH_SHORT).show()
+            } finally {
+                isDeleting = false
             }
         }
     }
 
-    // Soft clear all logic: Database එකේ සියලුම Records වල show_in_history = false කිරීම
+    // Delete each of the current user's history rows. Partial failures remain visible.
     fun clearAllHistory() {
+        if (userId <= 0 || isDeleting) return
+
+        isDeleting = true
+
         coroutineScope.launch {
             try {
-                val response = apiService.hideAllFromHistory()
+                val response = apiService.clearUserHistory(userId)
+
                 if (response.isSuccessful) {
                     historyList = emptyList()
-                    Toast.makeText(context, "History cleared successfully", Toast.LENGTH_SHORT).show()
+
+                    Toast.makeText(
+                        context,
+                        "History cleared successfully",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 } else {
-                    Toast.makeText(context, "Failed to clear history in DB", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        context,
+                        "Clear failed (HTTP ${response.code()})",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Log.e("HistoryScreen", "Clear history failed", e)
+
+                Toast.makeText(
+                    context,
+                    "Error: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } finally {
+                isDeleting = false
             }
         }
     }
@@ -291,7 +328,7 @@ fun HistoryScreen(
                 }
 
                 // History එකේ දත්ත තිබේ නම් පමණක් "Clear All" බොත්තම පෙන්වීම
-                if (historyList.isNotEmpty()) {
+                if (historyList.isNotEmpty() && !isDeleting) {
                     TextButton(onClick = { showClearDialog = true }) {
                         Text(text = "Clear All", color = Color(0xFFFF6B6B), fontWeight = FontWeight.Bold)
                     }
@@ -366,7 +403,7 @@ fun HistoryScreen(
                             item = item,
                             isDark = isDark,
                             onPlayAudio = onPlayAudio,
-                            onDeleteClick = { itemToDelete = item }
+                            onDeleteClick = { if (!isDeleting) itemToDelete = item }
                         )
                     }
                 }
@@ -452,7 +489,11 @@ fun HistoryCard(
             ) {
                 // Media Type Badge එක (Image ද Video ද යන්න)
                 Text(
-                    text = if (item.type == "IMAGE") "🖼️ Image" else "🎥 Video",
+                    text = when (item.type) {
+                        "VIDEO" -> "🎥 Video"
+                        "CAMERA" -> "📷 Camera"
+                        else -> "🖼️ Image"
+                    },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (isDark) Color(0xFF60A5FA) else Color(0xFF2682CC)

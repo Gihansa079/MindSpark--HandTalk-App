@@ -54,8 +54,8 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var loggedInUserName: String = "User"
 
     // Translation Data සඳහා වන Mutable State Variables
-    private var latestEnglishText = mutableStateOf("Hello")
-    private var latestSinhalaText = mutableStateOf("ආයුබෝවන්")
+    private var latestEnglishText = mutableStateOf("No translation yet")
+    private var latestSinhalaText = mutableStateOf("")
 
     // Retrofit API Service එක Lazy load කිරීම
     private val apiService by lazy { ApiService.create() }
@@ -102,9 +102,6 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         // 2. Text-To-Speech Engine එක Initialize කිරීම
         tts = TextToSpeech(this, this)
 
-        // API එකෙන් ලඟදීම සිදුවූ Translation දත්ත ලබා ගැනීම
-        fetchLatestTranslation()
-
         // Jetpack Compose UI එක Render කිරීම
         applyUI()
     }
@@ -118,18 +115,29 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // Backend (PostgreSQL via API) එකෙන් අලුත්ම Translation දත්ත ලබා ගැනීම
+    // Load the signed-in user's latest saved translation from PostgreSQL history.
     private fun fetchLatestTranslation() {
+        if (!::prefsManager.isInitialized) return
+        val userId = prefsManager.userId
+        if (userId <= 0) {
+            latestEnglishText.value = "No translation yet"
+            latestSinhalaText.value = ""
+            return
+        }
+
         lifecycleScope.launch {
             try {
-                val response = apiService.getLatestTranslation()
-                if (response.isSuccessful && response.body() != null) {
-                    val data = response.body()!!
-                    latestEnglishText.value = data.english_text ?: "Hello"
-                    latestSinhalaText.value = data.sinhala_text ?: "ආයුබෝවන්"
+                val response = apiService.getLatestTranslation(userId)
+                if (response.isSuccessful) {
+                    val data = response.body()
+                    latestEnglishText.value = data?.english_text.orEmpty()
+                        .ifBlank { "No translation yet" }
+                    latestSinhalaText.value = data?.sinhala_text.orEmpty()
+                } else {
+                    Log.e("HomeActivity", "Latest translation HTTP ${response.code()}")
                 }
             } catch (e: Exception) {
-                Log.e("HomeActivity", "PostgreSQL Fetch Error: ${e.message}")
+                Log.e("HomeActivity", "Latest translation request failed", e)
             }
         }
     }
@@ -180,16 +188,6 @@ class HomeActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     // FR 05: Audio Access පාලනය කරමින් Voice Output එක ලබා දෙන ශ්‍රිතය
     private fun speakText(text: String, languageCode: String, isFemale: Boolean) {
-        // [FR 05 Fix]: Audio Access Permission ලබා දී නැතිනම් Voice Output එක සීමා කිරීම
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            Toast.makeText(this, "Audio access permission is required to play voice output", Toast.LENGTH_SHORT).show()
-            // Permission එක නැවත ඉල්ලා සිටීම
-            requestAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            return
-        }
-
         // TTS Engine එක Ready නැතිනම් Toast එකක් පෙන්වා නතර වීම
         if (!isTtsReady || tts == null) {
             Toast.makeText(this, "TTS Engine is initializing...", Toast.LENGTH_SHORT).show()
@@ -278,6 +276,31 @@ fun HomeScreen(
     onExitApp: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefsManager = remember(context) { PreferencesManager(context) }
+
+    fun openCamera() {
+        val userId = prefsManager.userId
+        if (userId <= 0) {
+            Toast.makeText(context, "Please log in again", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(context, CameraActivity::class.java).apply {
+            putExtra("USER_ID", userId)
+        }
+        context.startActivity(intent)
+    }
+
+    fun openHistory() {
+        val userId = prefsManager.userId
+        if (userId <= 0) {
+            Toast.makeText(context, "Please log in again", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(context, HistoryActivity::class.java).apply {
+            putExtra("USER_ID", userId)
+        }
+        context.startActivity(intent)
+    }
     var selectedTab by remember { mutableIntStateOf(0) }
     var showExitDialog by remember { mutableStateOf(false) }
 
@@ -288,16 +311,16 @@ fun HomeScreen(
 
     // Light / Dark Theme වලට අදාළ Gradient Colors
     val bgGradient = if (isDark) {
-        listOf(Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF0F172A))
+        listOf(Color(0xFF06162F), Color(0xFF0B2B54), Color(0xFF10213B))
     } else {
-        listOf(Color(0xFF042F62), Color(0xFF2682CC), Color(0xFFEAF6FF))
+        listOf(Color(0xFF064C99), Color(0xFF1687D7), Color(0xFFB9E6FF))
     }
 
-    val cardBg = if (isDark) Color(0xFF1E293B) else Color.White.copy(alpha = 0.95f)
+    val cardBg = if (isDark) Color(0xFF142D50) else Color.White.copy(alpha = 0.97f)
     val cardTextColor = if (isDark) Color.White else Color.Black
-    val featureCardBg1 = if (isDark) Color(0xFF0369A1) else Color(0xFFE0F2FE)
-    val featureCardBg2 = if (isDark) Color(0xFF158017) else Color(0xFFDCFCE7)
-    val featureCardBg3 = if (isDark) Color(0xFFB45309) else Color(0xFFFEF3C7)
+    val featureCardBg1 = if (isDark) Color(0xFF164A82) else Color(0xFFDFF2FF)
+    val featureCardBg2 = if (isDark) Color(0xFF126452) else Color(0xFFDCF9EC)
+    val featureCardBg3 = if (isDark) Color(0xFF85501B) else Color(0xFFFFF0D8)
     val featureTextColor = if (isDark) Color.White else Color(0xFF0F172A)
 
     Scaffold(
@@ -305,7 +328,7 @@ fun HomeScreen(
         bottomBar = {
             // Bottom Navigation Bar එක
             NavigationBar(
-                containerColor = if (isDark) Color(0xFF1E293B) else Color.White
+                containerColor = if (isDark) Color(0xFF0C2341) else Color.White
             ) {
                 NavigationBarItem(
                     selected = selectedTab == 0,
@@ -318,7 +341,7 @@ fun HomeScreen(
                     selected = selectedTab == 1,
                     onClick = {
                         selectedTab = 1
-                        context.startActivity(Intent(context, CameraActivity::class.java))
+                        openCamera()
                     },
                     icon = { Text("📷") },
                     label = { Text("Camera") }
@@ -407,8 +430,9 @@ fun HomeScreen(
                 // Real-time AI Vision Translation Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(30.dp),
-                    colors = CardDefaults.cardColors(containerColor = cardBg)
+                    shape = RoundedCornerShape(26.dp),
+                    colors = CardDefaults.cardColors(containerColor = cardBg),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
                 ) {
                     Column(
                         modifier = Modifier.padding(20.dp)
@@ -443,20 +467,20 @@ fun HomeScreen(
 
                         Button(
                             onClick = {
-                                context.startActivity(Intent(context, CameraActivity::class.java))
+                                openCamera()
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(52.dp),
                             shape = RoundedCornerShape(18.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF042F62)
+                                containerColor = Color(0xFF030D1F)
                             )
                         ) {
                             Text(
                                 text = "📷 Start Translation",
                                 fontSize = 18.sp,
-                                color = Color.White
+                                color = Color(0xFFF0F1F3)
                             )
                         }
                     }
@@ -477,7 +501,7 @@ fun HomeScreen(
                 FeatureCard(
                     modifier = Modifier.fillMaxWidth(),
                     icon = "🖼",
-                    title = "Image Recognition",
+                    title = "Media Recognition",
                     backgroundColor = featureCardBg1,
                     textColor = featureTextColor,
                     onClick = {
@@ -513,8 +537,7 @@ fun HomeScreen(
                         backgroundColor = featureCardBg3,
                         textColor = featureTextColor,
                         onClick = {
-                            val intent = Intent(context, HistoryActivity::class.java)
-                            context.startActivity(intent)
+                            openHistory()
                         }
                     )
                 }
@@ -524,8 +547,9 @@ fun HomeScreen(
                 // Latest Translation Section (Audio Player Controls)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(25.dp),
-                    colors = CardDefaults.cardColors(containerColor = cardBg)
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = cardBg),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
                 ) {
                     Column(
                         modifier = Modifier.padding(20.dp)
@@ -578,7 +602,10 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { onPlayAudio(latestSinhalaState.value, "si") },
+                                onClick = {
+                                    onPlayAudio(latestSinhalaState.value, "si")
+                                },
+                                enabled = latestSinhalaState.value.isNotBlank(),
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
@@ -586,7 +613,11 @@ fun HomeScreen(
                             }
 
                             OutlinedButton(
-                                onClick = { onPlayAudio(latestEnglishState.value, "en") },
+                                onClick = {
+                                    onPlayAudio(latestEnglishState.value, "en")
+                                },
+                                enabled = latestEnglishState.value.isNotBlank() &&
+                                        latestEnglishState.value != "No translation yet",
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
@@ -640,10 +671,10 @@ fun FeatureCard(
 ) {
     Card(
         onClick = onClick,
-        modifier = modifier.height(105.dp),
-        shape = RoundedCornerShape(22.dp),
+        modifier = modifier.height(112.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
     ) {
         Column(
             modifier = Modifier
@@ -654,7 +685,7 @@ fun FeatureCard(
         ) {
             Text(
                 text = icon,
-                fontSize = 32.sp
+                fontSize = 34.sp
             )
 
             Spacer(modifier = Modifier.height(6.dp))
