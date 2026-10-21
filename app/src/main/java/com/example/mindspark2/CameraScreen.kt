@@ -1,3 +1,4 @@
+
 package com.example.mindspark2.camera
 
 import android.Manifest
@@ -1016,61 +1017,74 @@ fun CameraScreen(
                                                     isCaptured = false
                                                     Toast.makeText(context, "Processing recorded gesture...", Toast.LENGTH_SHORT).show()
                                                     coroutineScope.launch(Dispatchers.Default) {
-                                                        val frames = mutableListOf<Bitmap>()
                                                         val retriever = MediaMetadataRetriever()
                                                         try {
                                                             retriever.setDataSource(context, savedUri)
                                                             val durationMs = retriever.extractMetadata(
                                                                 MediaMetadataRetriever.METADATA_KEY_DURATION
                                                             )?.toLongOrNull() ?: 0L
-                                                            require(durationMs > 0L) { "Video has no valid duration" }
-
-                                                            // Diagnostic test: compare normal vs horizontally mirrored video.
-                                                            // Keep the original output until training orientation is confirmed.
+                                                            require(durationMs >= 1000L) { "Record at least one second of gesture" }
                                                             val durationUs = durationMs * 1000L
-                                                            val mirroredFrames = mutableListOf<Bitmap>()
-                                                            try {
-                                                                for (i in 0 until 30) {
-                                                                    // Uniform chronological sampling, avoiding exact first/last frame.
-                                                                    val timeUs = durationUs * (2L * i + 1L) / 60L
-                                                                    val frame = retriever.getFrameAtTime(
-                                                                        timeUs,
-                                                                        MediaMetadataRetriever.OPTION_CLOSEST
-                                                                    ) ?: throw IllegalStateException("Cannot extract frame $i")
-                                                                    try {
-                                                                        val scaled = Bitmap.createScaledBitmap(frame, 128, 128, true)
+
+                                                            // Compare full recording with a center-trimmed recording.
+                                                            // This cannot fix model errors, but can reject unstable predictions.
+                                                            fun classifyWindow(startFraction: Double, endFraction: Double):
+                                                                    DynamicGestureClassifier.Prediction {
+                                                                val windowFrames = mutableListOf<Bitmap>()
+                                                                try {
+                                                                    for (i in 0 until 30) {
+                                                                        val fraction = startFraction +
+                                                                                (endFraction - startFraction) * (i + 0.5) / 30.0
+                                                                        val timeUs = (durationUs * fraction).toLong()
+                                                                            .coerceIn(0L, durationUs - 1L)
+                                                                        val raw = retriever.getFrameAtTime(
+                                                                            timeUs,
+                                                                            MediaMetadataRetriever.OPTION_CLOSEST
+                                                                        ) ?: error("Unable to extract video frame $i")
                                                                         try {
-                                                                            val normal = scaled.copy(Bitmap.Config.ARGB_8888, false)
-                                                                                ?: error("Cannot copy frame $i")
-                                                                            frames.add(normal)
-                                                                            val flip = Matrix().apply { preScale(-1f, 1f) }
-                                                                            mirroredFrames.add(
-                                                                                Bitmap.createBitmap(
-                                                                                    normal, 0, 0, 128, 128, flip, true
-                                                                                )
+                                                                            // Match training's direct 128x128 resize and RGB order.
+                                                                            val scaled = Bitmap.createScaledBitmap(raw, 128, 128, true)
+                                                                            windowFrames.add(
+                                                                                if (scaled === raw) {
+                                                                                    raw.copy(Bitmap.Config.ARGB_8888, false)
+                                                                                        ?: error("Unable to copy video frame $i")
+                                                                                } else scaled
                                                                             )
                                                                         } finally {
-                                                                            if (scaled !== frame) scaled.recycle()
+                                                                            raw.recycle()
                                                                         }
-                                                                    } finally {
-                                                                        frame.recycle()
                                                                     }
+                                                                    return dynamicGestureClassifier.predict(windowFrames)
+                                                                } finally {
+                                                                    windowFrames.forEach { if (!it.isRecycled) it.recycle() }
                                                                 }
-                                                                Log.d("DynamicModelTest", "Video frames extracted: ${frames.size}")
-                                                                val prediction = dynamicGestureClassifier.predict(frames)
-                                                                Log.d("DynamicModelTest", "NORMAL: ${prediction.label}, confidence=${prediction.confidence}")
-                                                                val mirrorPrediction = dynamicGestureClassifier.predict(mirroredFrames)
-                                                                Log.d("DynamicModelTest", "MIRRORED: ${mirrorPrediction.label}, confidence=${mirrorPrediction.confidence}")
-                                                                // Do NOT automatically pick the highest confidence;
-                                                                // the correct orientation must match training data.
-                                                                withContext(Dispatchers.Main) {
+                                                            }
+
+                                                            val full = classifyWindow(0.0, 1.0)
+                                                            val trimmed = classifyWindow(0.10, 0.90)
+                                                            Log.d("DynamicModelTest", "FULL: ${full.label}, confidence=${full.confidence}")
+                                                            Log.d("DynamicModelTest", "TRIMMED: ${trimmed.label}, confidence=${trimmed.confidence}")
+
+                                                            // Conservative filter: avoid saving low-confidence or unstable results.
+                                                            // A confidently wrong model can still pass this filter.
+                                                            val accepted = full.classIndex == trimmed.classIndex &&
+                                                                    full.confidence >= 0.80f && trimmed.confidence >= 0.80f
+                                                            withContext(Dispatchers.Main) {
+                                                                if (accepted) {
                                                                     val sinhalaWord = dynamicSinhalaLabels.entries
-                                                                        .firstOrNull { it.key.equals(prediction.label.trim(), ignoreCase = true) }
-                                                                        ?.value ?: "නොදන්නා සංඥාවකි"
+                                                                        .firstOrNull {
+                                                                            it.key.equals(full.label.trim(), ignoreCase = true)
+                                                                        }?.value ?: "නොදන්නා සංඥාවකි"
                                                                     handleLocalGestureOutput(sinhalaWord)
+                                                                } else {
+                                                                    // Unknown predictions are not saved to History.
+                                                                    handleLocalGestureOutput("නොදන්නා සංඥාවකි")
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "Gesture unclear. Please try again slowly.",
+                                                                        Toast.LENGTH_LONG
+                                                                    ).show()
                                                                 }
-                                                            } finally {
-                                                                mirroredFrames.forEach { if (!it.isRecycled) it.recycle() }
                                                             }
                                                         } catch (e: Exception) {
                                                             Log.e("DynamicModelTest", "Dynamic video inference failed", e)
@@ -1083,7 +1097,6 @@ fun CameraScreen(
                                                             }
                                                         } finally {
                                                             retriever.release()
-                                                            frames.forEach { if (!it.isRecycled) it.recycle() }
                                                             savedUri.path?.let { File(it).delete() }
                                                         }
                                                     }

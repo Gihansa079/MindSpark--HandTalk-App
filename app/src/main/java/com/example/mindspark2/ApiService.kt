@@ -22,7 +22,7 @@ import retrofit2.http.Header
 
 // Change this IP to your computer's current IPv4 address
 // when using a real Android phone.
-private const val LOCAL_IP = "10.135.3.122"
+private const val LOCAL_IP = "10.40.15.138"
 private const val PORT = "3000"
 
 fun isEmulator(): Boolean {
