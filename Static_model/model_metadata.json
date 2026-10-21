@@ -1,0 +1,36 @@
+{
+  "model_type": "MediaPipe hand landmarks + dense neural network",
+  "input_shape": [
+    1,
+    63
+  ],
+  "input_dtype": "float32",
+  "feature_order": "21 landmarks, each x,y,z; raw MediaPipe normalized coordinates",
+  "normalization": "none",
+  "hand_count": 1,
+  "labels": [
+    "I(mama)",
+    "ayubowan",
+    "brother",
+    "five",
+    "four",
+    "good(hodai)",
+    "his",
+    "house",
+    "i_love_you",
+    "me(mata)",
+    "my(mage)",
+    "naraka",
+    "oba",
+    "one",
+    "sister",
+    "three",
+    "two",
+    "what",
+    "who",
+    "why"
+  ],
+  "test_accuracy": 0.9949238578680203,
+  "num_train": 1575,
+  "num_test": 394
+}
