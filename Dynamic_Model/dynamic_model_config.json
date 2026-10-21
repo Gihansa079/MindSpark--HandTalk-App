@@ -1,0 +1,38 @@
+{
+    "project": "HandTalk",
+    "model": "handtalk_dynamic.tflite",
+    "hand_landmarker": "hand_landmarker.task",
+    "architecture": "MobileNetV2 + LSTM",
+    "sequence_length": 30,
+    "image_width": 128,
+    "image_height": 128,
+    "channels": 3,
+    "input_shape": [
+        1,
+        30,
+        128,
+        128,
+        3
+    ],
+    "input_dtype": "float32",
+    "color_format": "RGB",
+    "pixel_range": [
+        0,
+        255
+    ],
+    "normalization": "inside_model",
+    "conversion_mode": "TFLITE_BUILTINS",
+    "test_accuracy": 0.84,
+    "labels": [
+        "Assent",
+        "Good Evening",
+        "Good Morning",
+        "Good Night",
+        "Please",
+        "Sorry",
+        "Thank you",
+        "Today",
+        "Yesterday",
+        "welcome"
+    ]
+}
